@@ -1,0 +1,22 @@
+version: 1
+name: pocketbeagle2-fastboot
+goal: Bring up fastboot on the connected PocketBeagle 2 and leave a reproducible solution in the candidate workspace.
+
+parameters:
+  serial: /dev/ttyACM0
+
+candidates:
+  automation: ./automation
+
+agent:
+  devices:
+    - /dev/bus/usb
+    - /dev/ttyACM0
+  timeout: 30m
+
+verify:
+  command: [./verify]
+  pass_env: [AIL_GPIOCTL]
+  timeout: 5m
+
+attempts: 20

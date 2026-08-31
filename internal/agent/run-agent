@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+request=${1:?request JSON path is required}
+
+prompt=$(node - "$request" <<'JS'
+const fs = require("fs");
+const request = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const lines = [
+  `Goal: ${request.goal}`,
+  `Attempt: ${request.attempt}`,
+  `Current evidence: ${request.evidence}`,
+  `Persistent build cache: ${request.cache}`,
+  "Candidate directories:",
+];
+for (const [name, path] of Object.entries(request.candidates)) {
+  lines.push(`- ${name}: ${path}`);
+}
+if (Object.keys(request.references || {}).length) {
+  lines.push("Read-only references:");
+  for (const [name, path] of Object.entries(request.references)) {
+    lines.push(`- ${name}: ${path}`);
+  }
+}
+if ((request.devices || []).length) {
+  lines.push("Hardware made available inside this container:");
+  for (const path of request.devices) lines.push(`- ${path}`);
+}
+lines.push("Inspect the evidence and references, then build or repair the candidate and report what you changed.");
+process.stdout.write(lines.join("\n"));
+JS
+)
+
+transcript=$(mktemp)
+set +e
+pi \
+	--provider openrouter \
+	--model openai/gpt-5.6-sol \
+	--thinking high \
+	--session-id alo \
+	--session-dir /session \
+	--no-context-files \
+	--no-approve \
+	--append-system-prompt /usr/local/share/alo-agent-instructions.md \
+	-p "$prompt" | tee "$transcript"
+status=${PIPESTATUS[0]}
+set -e
+if (( status != 0 )); then
+	exit "$status"
+fi
+if tail -n 1 "$transcript" | grep -q '^ALO_BLOCKED:'; then
+	exit 3
+fi
