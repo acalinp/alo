@@ -35,13 +35,17 @@ process.stdout.write(lines.join("\n"));
 JS
 )
 
+provider=$(jq -er '.provider' "$request")
+model=$(jq -er '.model' "$request")
+thinking=$(jq -er '.thinking' "$request")
+
 transcript=$(mktemp)
 trap 'rm -f "$transcript"' EXIT
 set +e
 pi \
-	--provider openrouter \
-	--model openai/gpt-5.6-sol \
-	--thinking high \
+	--provider "$provider" \
+	--model "$model" \
+	--thinking "$thinking" \
 	--session-id alo \
 	--session-dir /session \
 	--no-context-files \

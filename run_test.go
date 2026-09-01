@@ -166,6 +166,10 @@ func TestResumeInterruptedAgentTurn(t *testing.T) {
 test -f "$ALO_CANDIDATE/complete" || exit 1
 `)
 	config := testConfig(root, candidate, verifier)
+	config.Agent.Provider = "anthropic"
+	config.Agent.Model = "claude-sonnet-4-5"
+	config.Agent.Thinking = "medium"
+	config.Agent.PassEnv = []string{"ANTHROPIC_API_KEY"}
 	ctx, cancel := context.WithCancel(context.Background())
 	firstRuntime := &fakeRuntime{turn: func(ctx context.Context, turn AgentTurn) (AgentResult, error) {
 		if err := os.WriteFile(filepath.Join(turn.Config.Candidate, "partial"), []byte("partial"), 0o644); err != nil {
@@ -186,6 +190,12 @@ test -f "$ALO_CANDIDATE/complete" || exit 1
 		t.Fatalf("interrupted result = code %d, phase %s", first.ExitCode, first.State.Phase)
 	}
 	secondRuntime := &fakeRuntime{turn: func(_ context.Context, turn AgentTurn) (AgentResult, error) {
+		if turn.Config.Agent.Provider != "anthropic" ||
+			turn.Config.Agent.Model != "claude-sonnet-4-5" ||
+			turn.Config.Agent.Thinking != "medium" ||
+			len(turn.Config.Agent.PassEnv) != 1 || turn.Config.Agent.PassEnv[0] != "ANTHROPIC_API_KEY" {
+			t.Fatalf("resumed agent config = %#v", turn.Config.Agent)
+		}
 		if _, err := os.Stat(filepath.Join(turn.Config.Candidate, "partial")); err != nil {
 			t.Fatalf("partial edit was not retained: %v", err)
 		}

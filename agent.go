@@ -11,6 +11,9 @@ const agentBlockedPrefix = "ALO_BLOCKED:"
 type AgentRequest struct {
 	Goal       string            `json:"goal"`
 	Attempt    int               `json:"attempt"`
+	Provider   string            `json:"provider"`
+	Model      string            `json:"model"`
+	Thinking   string            `json:"thinking"`
 	Parameters map[string]string `json:"parameters,omitempty"`
 	Candidate  string            `json:"candidate"`
 	References map[string]string `json:"references,omitempty"`

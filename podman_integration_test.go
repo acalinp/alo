@@ -13,7 +13,6 @@ func TestRootlessPodmanReplayAndPersistentWorkshop(t *testing.T) {
 	if image == "" {
 		t.Skip("set ALO_PODMAN_TEST_IMAGE to a local image containing sh")
 	}
-	t.Setenv("OPENROUTER_API_KEY", "podman-boundary-test")
 	root := t.TempDir()
 	candidate := filepath.Join(root, "candidate")
 	reference := filepath.Join(root, "reference")

@@ -247,8 +247,9 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn AgentTurn) (AgentResult, er
 	if console == nil {
 		console = p.console()
 	}
+	progress := newTerminalProgress(console, fmt.Sprintf("[%s] agent working", turn.Store.ID))
 	tail := &tailBuffer{maximum: 64 << 10}
-	target := io.MultiWriter(logFile, console, tail)
+	target := io.MultiWriter(logFile, progress, tail)
 	var secrets []string
 	for _, variable := range turn.Config.Agent.PassEnv {
 		secrets = append(secrets, os.Getenv(variable))
@@ -262,6 +263,8 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn AgentTurn) (AgentResult, er
 	if err := command.Start(); err != nil {
 		return AgentResult{}, fmt.Errorf("start agent workshop: %w", err)
 	}
+	progress.Start()
+	defer progress.Stop()
 	waited := make(chan error, 1)
 	go func() { waited <- command.Wait() }()
 	var waitErr error
@@ -511,6 +514,9 @@ func agentRequest(config *Config, store *RunStore, attempt int) AgentRequest {
 	return AgentRequest{
 		Goal:       config.Goal,
 		Attempt:    attempt,
+		Provider:   config.Agent.Provider,
+		Model:      config.Agent.Model,
+		Thinking:   config.Agent.Thinking,
 		Parameters: config.Parameters,
 		Candidate:  "/work/candidate",
 		References: references,

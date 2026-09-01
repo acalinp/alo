@@ -19,12 +19,16 @@ const (
 	defaultAgentTimeout    = 15 * time.Minute
 	defaultExerciseTimeout = 30 * time.Minute
 	defaultCommandTimeout  = 30 * time.Minute
+	defaultAgentProvider   = "openrouter"
+	defaultAgentModel      = "openai/gpt-5.6-sol"
+	defaultAgentThinking   = "high"
 )
 
 var (
 	resourceNamePattern    = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 	parameterNamePattern   = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 	environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	agentValuePattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/@:+-]*$`)
 )
 
 type Config struct {
@@ -46,8 +50,11 @@ type Config struct {
 }
 
 type AgentConfig struct {
-	PassEnv []string `yaml:"pass_env,omitempty"`
-	Timeout Duration `yaml:"timeout,omitempty"`
+	Provider string   `yaml:"provider,omitempty"`
+	Model    string   `yaml:"model,omitempty"`
+	Thinking string   `yaml:"thinking,omitempty"`
+	PassEnv  []string `yaml:"pass_env,omitempty"`
+	Timeout  Duration `yaml:"timeout,omitempty"`
 }
 
 type SandboxConfig struct {
@@ -132,6 +139,13 @@ func (c *Config) setDefaults() {
 	if c.Agent.Timeout == 0 {
 		c.Agent.Timeout = Duration(defaultAgentTimeout)
 	}
+	if c.Agent.Provider == "" && c.Agent.Model == "" {
+		c.Agent.Provider = defaultAgentProvider
+		c.Agent.Model = defaultAgentModel
+	}
+	if c.Agent.Thinking == "" {
+		c.Agent.Thinking = defaultAgentThinking
+	}
 	if c.Exercise.Timeout == 0 {
 		c.Exercise.Timeout = Duration(defaultExerciseTimeout)
 	}
@@ -140,16 +154,6 @@ func (c *Config) setDefaults() {
 	}
 	if c.Prepare != nil && c.Prepare.Timeout == 0 {
 		c.Prepare.Timeout = Duration(defaultCommandTimeout)
-	}
-	foundAgentKey := false
-	for _, name := range c.Agent.PassEnv {
-		if name == "OPENROUTER_API_KEY" {
-			foundAgentKey = true
-			break
-		}
-	}
-	if !foundAgentKey {
-		c.Agent.PassEnv = append(c.Agent.PassEnv, "OPENROUTER_API_KEY")
 	}
 }
 
@@ -270,6 +274,17 @@ func (c *Config) Validate() error {
 	if time.Duration(c.Agent.Timeout) <= 0 || time.Duration(c.Exercise.Timeout) <= 0 || time.Duration(c.Verify.Timeout) <= 0 {
 		return errors.New("agent, exercise, and verify timeouts must be positive")
 	}
+	if err := validateAgentValue("agent.provider", c.Agent.Provider); err != nil {
+		return err
+	}
+	if err := validateAgentValue("agent.model", c.Agent.Model); err != nil {
+		return err
+	}
+	switch c.Agent.Thinking {
+	case "off", "minimal", "low", "medium", "high", "xhigh", "max":
+	default:
+		return fmt.Errorf("agent.thinking %q must be one of off, minimal, low, medium, high, xhigh, or max", c.Agent.Thinking)
+	}
 	if c.Prepare != nil && time.Duration(c.Prepare.Timeout) <= 0 {
 		return errors.New("prepare timeout must be positive")
 	}
@@ -327,6 +342,13 @@ func (c *Config) Validate() error {
 		if err := validateTrustedExecutable(label, command.Command[0], c.Candidate); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validateAgentValue(label, value string) error {
+	if !agentValuePattern.MatchString(value) {
+		return fmt.Errorf("%s %q must be a single provider or model identifier", label, value)
 	}
 	return nil
 }

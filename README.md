@@ -34,10 +34,12 @@ go build -o alo ./cmd/alo
 ./alo logs RUN_ID
 ```
 
-Alo owns and lazily builds its agent toolbox; loop authors do not provide an
-image or agent command. The bundled agent currently uses Pi through OpenRouter
-and reads `OPENROUTER_API_KEY`. Candidate artifacts may be published through
-`.alo/outputs.json`; Alo confines them to the candidate and records their hashes.
+Alo owns and lazily builds its Pi-based agent toolbox; loop authors do not
+provide an image or agent command. `agent` selects the provider, model, thinking
+level, and credential environment names. Only explicitly named variables enter
+the workshop, and the resolved selection is retained with the run. Candidate
+artifacts may be published through `.alo/outputs.json`; Alo confines them to the
+candidate and records their hashes.
 
 ## Contributor rules
 
