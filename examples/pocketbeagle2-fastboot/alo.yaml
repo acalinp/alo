@@ -5,18 +5,26 @@ goal: Bring up fastboot on the connected PocketBeagle 2 and leave a reproducible
 parameters:
   serial: /dev/ttyACM0
 
-candidates:
-  automation: ./automation
+candidate: ./automation
 
-agent:
+sandbox:
   devices:
     - /dev/bus/usb
     - /dev/ttyACM0
+
+agent:
+  timeout: 30m
+
+prepare:
+  command: [./prepare]
+  pass_env: [AIL_GPIOCTL]
+  timeout: 30s
+
+exercise:
   timeout: 30m
 
 verify:
   command: [./verify]
-  pass_env: [AIL_GPIOCTL]
-  timeout: 5m
+  timeout: 30s
 
 attempts: 20

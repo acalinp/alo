@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	defaultAttempts      = 10
-	defaultAgentTimeout  = 15 * time.Minute
-	defaultVerifyTimeout = 30 * time.Minute
+	defaultAttempts        = 10
+	defaultAgentTimeout    = 15 * time.Minute
+	defaultExerciseTimeout = 30 * time.Minute
+	defaultCommandTimeout  = 30 * time.Minute
 )
 
 var (
@@ -31,10 +32,13 @@ type Config struct {
 	Name       string            `yaml:"name"`
 	Goal       string            `yaml:"goal"`
 	Parameters map[string]string `yaml:"parameters,omitempty"`
-	Candidates map[string]string `yaml:"candidates"`
+	Candidate  string            `yaml:"candidate"`
 	References map[string]string `yaml:"references,omitempty"`
-	Agent      AgentConfig       `yaml:"agent"`
-	Verify     VerifyConfig      `yaml:"verify"`
+	Sandbox    SandboxConfig     `yaml:"sandbox,omitempty"`
+	Agent      AgentConfig       `yaml:"agent,omitempty"`
+	Prepare    *CommandConfig    `yaml:"prepare,omitempty"`
+	Exercise   ExerciseConfig    `yaml:"exercise,omitempty"`
+	Verify     CommandConfig     `yaml:"verify"`
 	Attempts   int               `yaml:"attempts,omitempty"`
 
 	Path    string `yaml:"-"`
@@ -43,11 +47,18 @@ type Config struct {
 
 type AgentConfig struct {
 	PassEnv []string `yaml:"pass_env,omitempty"`
-	Devices []string `yaml:"devices,omitempty"`
 	Timeout Duration `yaml:"timeout,omitempty"`
 }
 
-type VerifyConfig struct {
+type SandboxConfig struct {
+	Devices []string `yaml:"devices,omitempty"`
+}
+
+type ExerciseConfig struct {
+	Timeout Duration `yaml:"timeout,omitempty"`
+}
+
+type CommandConfig struct {
 	Command []string `yaml:"command"`
 	PassEnv []string `yaml:"pass_env,omitempty"`
 	Timeout Duration `yaml:"timeout,omitempty"`
@@ -112,9 +123,6 @@ func (c *Config) setDefaults() {
 	if c.Parameters == nil {
 		c.Parameters = make(map[string]string)
 	}
-	if c.Candidates == nil {
-		c.Candidates = make(map[string]string)
-	}
 	if c.References == nil {
 		c.References = make(map[string]string)
 	}
@@ -123,6 +131,15 @@ func (c *Config) setDefaults() {
 	}
 	if c.Agent.Timeout == 0 {
 		c.Agent.Timeout = Duration(defaultAgentTimeout)
+	}
+	if c.Exercise.Timeout == 0 {
+		c.Exercise.Timeout = Duration(defaultExerciseTimeout)
+	}
+	if c.Verify.Timeout == 0 {
+		c.Verify.Timeout = Duration(defaultCommandTimeout)
+	}
+	if c.Prepare != nil && c.Prepare.Timeout == 0 {
+		c.Prepare.Timeout = Duration(defaultCommandTimeout)
 	}
 	foundAgentKey := false
 	for _, name := range c.Agent.PassEnv {
@@ -133,9 +150,6 @@ func (c *Config) setDefaults() {
 	}
 	if !foundAgentKey {
 		c.Agent.PassEnv = append(c.Agent.PassEnv, "OPENROUTER_API_KEY")
-	}
-	if c.Verify.Timeout == 0 {
-		c.Verify.Timeout = Duration(defaultVerifyTimeout)
 	}
 }
 
@@ -157,46 +171,72 @@ func (c *Config) resolvePaths() error {
 	}
 	c.BaseDir = base
 
-	for _, resources := range []map[string]string{c.Candidates, c.References} {
-		for name, value := range resources {
-			if !filepath.IsAbs(value) {
-				value = filepath.Join(c.BaseDir, value)
-			}
-			absolute, err := filepath.Abs(value)
-			if err != nil {
-				return fmt.Errorf("resolve resource %q: %w", name, err)
-			}
-			resolved, err := filepath.EvalSymlinks(absolute)
-			if err != nil {
-				return fmt.Errorf("resolve resource %q: %w", name, err)
-			}
-			resources[name] = filepath.Clean(resolved)
+	if c.Candidate != "" {
+		resolved, err := resolveResource(c.BaseDir, c.Candidate)
+		if err != nil {
+			return fmt.Errorf("resolve candidate: %w", err)
 		}
+		c.Candidate = resolved
 	}
-	if len(c.Verify.Command) > 0 {
-		command := c.Verify.Command[0]
-		if strings.ContainsRune(command, filepath.Separator) {
-			if !filepath.IsAbs(command) {
-				command = filepath.Join(c.BaseDir, command)
-			}
-		} else if command != "" {
-			found, err := exec.LookPath(command)
-			if err != nil {
-				return fmt.Errorf("resolve verifier executable %q: %w", command, err)
-			}
-			command = found
-		}
-		absolute, err := filepath.Abs(command)
+	for name, value := range c.References {
+		resolved, err := resolveResource(c.BaseDir, value)
 		if err != nil {
-			return fmt.Errorf("resolve verifier executable: %w", err)
+			return fmt.Errorf("resolve reference %q: %w", name, err)
 		}
-		resolved, err := filepath.EvalSymlinks(absolute)
+		c.References[name] = resolved
+	}
+	for label, command := range map[string]*CommandConfig{
+		"prepare": c.Prepare,
+		"verify":  &c.Verify,
+	} {
+		if command == nil || len(command.Command) == 0 {
+			continue
+		}
+		resolved, err := resolveExecutable(c.BaseDir, command.Command[0])
 		if err != nil {
-			return fmt.Errorf("resolve verifier executable %q: %w", command, err)
+			return fmt.Errorf("resolve %s executable: %w", label, err)
 		}
-		c.Verify.Command[0] = filepath.Clean(resolved)
+		command.Command[0] = resolved
 	}
 	return nil
+}
+
+func resolveResource(base, path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(base, path)
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func resolveExecutable(base, command string) (string, error) {
+	if strings.ContainsRune(command, filepath.Separator) {
+		if !filepath.IsAbs(command) {
+			command = filepath.Join(base, command)
+		}
+	} else if command != "" {
+		found, err := exec.LookPath(command)
+		if err != nil {
+			return "", err
+		}
+		command = found
+	}
+	absolute, err := filepath.Abs(command)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
 }
 
 func (c *Config) Validate() error {
@@ -215,14 +255,23 @@ func (c *Config) Validate() error {
 	if c.Attempts < 1 {
 		return errors.New("attempts must be at least 1")
 	}
-	if len(c.Candidates) == 0 {
-		return errors.New("at least one candidate is required")
+	if c.Candidate == "" {
+		return errors.New("candidate is required")
+	}
+	if err := validateDirectory("candidate", c.Candidate); err != nil {
+		return err
 	}
 	if len(c.Verify.Command) == 0 || strings.TrimSpace(c.Verify.Command[0]) == "" {
 		return errors.New("verify.command requires at least one argument")
 	}
-	if time.Duration(c.Agent.Timeout) <= 0 || time.Duration(c.Verify.Timeout) <= 0 {
-		return errors.New("agent and verify timeouts must be positive")
+	if c.Prepare != nil && (len(c.Prepare.Command) == 0 || strings.TrimSpace(c.Prepare.Command[0]) == "") {
+		return errors.New("prepare.command requires at least one argument")
+	}
+	if time.Duration(c.Agent.Timeout) <= 0 || time.Duration(c.Exercise.Timeout) <= 0 || time.Duration(c.Verify.Timeout) <= 0 {
+		return errors.New("agent, exercise, and verify timeouts must be positive")
+	}
+	if c.Prepare != nil && time.Duration(c.Prepare.Timeout) <= 0 {
+		return errors.New("prepare timeout must be positive")
 	}
 
 	for name := range c.Parameters {
@@ -230,113 +279,120 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("parameter name %q must match %s", name, parameterNamePattern)
 		}
 	}
-	for label, names := range map[string][]string{
+	environments := map[string][]string{
 		"agent.pass_env":  c.Agent.PassEnv,
 		"verify.pass_env": c.Verify.PassEnv,
-	} {
-		seen := make(map[string]bool)
-		for _, name := range names {
-			if !environmentNamePattern.MatchString(name) {
-				return fmt.Errorf("%s value %q is not an environment-variable name", label, name)
-			}
-			if seen[name] {
-				return fmt.Errorf("%s contains duplicate %q", label, name)
-			}
-			if strings.HasPrefix(name, "ALO_") {
-				return fmt.Errorf("%s may not pass reserved ALO_ variable %q", label, name)
-			}
-			seen[name] = true
+	}
+	if c.Prepare != nil {
+		environments["prepare.pass_env"] = c.Prepare.PassEnv
+	}
+	for label, names := range environments {
+		if err := validateEnvironmentNames(label, names); err != nil {
+			return err
 		}
 	}
-	seenDevices := make(map[string]bool)
-	for _, path := range c.Agent.Devices {
+	if err := validateDevices(c.Sandbox.Devices); err != nil {
+		return err
+	}
+
+	referenceEnvironmentNames := make(map[string]string)
+	for name, value := range c.References {
+		if !resourceNamePattern.MatchString(name) {
+			return fmt.Errorf("reference name %q must match %s", name, resourceNamePattern)
+		}
+		if err := validateDirectory(fmt.Sprintf("reference %q", name), value); err != nil {
+			return err
+		}
+		if pathsOverlap(c.Candidate, value) {
+			return fmt.Errorf("candidate overlaps reference %q", name)
+		}
+		environment := environmentName(name)
+		if previous, exists := referenceEnvironmentNames[environment]; exists {
+			return fmt.Errorf("reference names %q and %q collide in verifier environment", previous, name)
+		}
+		referenceEnvironmentNames[environment] = name
+	}
+	referencePaths := sortedKeys(c.References)
+	for first := 0; first < len(referencePaths); first++ {
+		for second := first + 1; second < len(referencePaths); second++ {
+			if pathsOverlap(c.References[referencePaths[first]], c.References[referencePaths[second]]) {
+				return fmt.Errorf("references %q and %q overlap", referencePaths[first], referencePaths[second])
+			}
+		}
+	}
+	for label, command := range map[string]*CommandConfig{"prepare": c.Prepare, "verify": &c.Verify} {
+		if command == nil {
+			continue
+		}
+		if err := validateTrustedExecutable(label, command.Command[0], c.Candidate); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateEnvironmentNames(label string, names []string) error {
+	seen := make(map[string]bool)
+	for _, name := range names {
+		if !environmentNamePattern.MatchString(name) {
+			return fmt.Errorf("%s value %q is not an environment-variable name", label, name)
+		}
+		if seen[name] {
+			return fmt.Errorf("%s contains duplicate %q", label, name)
+		}
+		if strings.HasPrefix(name, "ALO_") {
+			return fmt.Errorf("%s may not pass reserved ALO_ variable %q", label, name)
+		}
+		seen[name] = true
+	}
+	return nil
+}
+
+func validateDevices(devices []string) error {
+	seen := make(map[string]bool)
+	for _, path := range devices {
 		if !filepath.IsAbs(path) {
-			return fmt.Errorf("agent device path %q must be absolute", path)
+			return fmt.Errorf("sandbox device path %q must be absolute", path)
 		}
 		if strings.ContainsAny(path, ",:") {
-			return fmt.Errorf("agent device path %q may not contain a comma or colon", path)
+			return fmt.Errorf("sandbox device path %q may not contain a comma or colon", path)
 		}
 		path = filepath.Clean(path)
 		if path == "/dev" || !pathWithin(path, "/dev") {
-			return fmt.Errorf("agent device path %q must name a specific path beneath /dev", path)
+			return fmt.Errorf("sandbox device path %q must name a specific path beneath /dev", path)
 		}
-		if seenDevices[path] {
-			return fmt.Errorf("agent.devices contains duplicate %q", path)
+		if seen[path] {
+			return fmt.Errorf("sandbox.devices contains duplicate %q", path)
 		}
-		seenDevices[path] = true
+		seen[path] = true
 	}
+	return nil
+}
 
-	for kind, resources := range map[string]map[string]string{
-		"candidate": c.Candidates,
-		"reference": c.References,
-	} {
-		environmentNames := make(map[string]string)
-		for name, value := range resources {
-			if !resourceNamePattern.MatchString(name) {
-				return fmt.Errorf("%s name %q must match %s", kind, name, resourceNamePattern)
-			}
-			info, err := os.Stat(value)
-			if err != nil {
-				return fmt.Errorf("%s %q: %w", kind, name, err)
-			}
-			if !info.IsDir() {
-				return fmt.Errorf("%s %q path %q is not a directory", kind, name, value)
-			}
-			if strings.Contains(value, ",") {
-				return fmt.Errorf("%s %q path may not contain a comma", kind, name)
-			}
-			environment := environmentName(name)
-			if previous, exists := environmentNames[environment]; exists {
-				return fmt.Errorf("%s names %q and %q collide in verifier environment", kind, previous, name)
-			}
-			environmentNames[environment] = name
-		}
+func validateDirectory(label, path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s: %w", label, err)
 	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s path %q is not a directory", label, path)
+	}
+	if strings.Contains(path, ",") {
+		return fmt.Errorf("%s path may not contain a comma", label)
+	}
+	return nil
+}
 
-	type namedPath struct {
-		kind string
-		name string
-		path string
+func validateTrustedExecutable(label, executable, candidate string) error {
+	info, err := os.Stat(executable)
+	if err != nil {
+		return fmt.Errorf("inspect %s executable: %w", label, err)
 	}
-	var paths []namedPath
-	for name, value := range c.Candidates {
-		paths = append(paths, namedPath{kind: "candidate", name: name, path: value})
+	if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		return fmt.Errorf("%s executable %q is not an executable file", label, executable)
 	}
-	for name, value := range c.References {
-		paths = append(paths, namedPath{kind: "reference", name: name, path: value})
-	}
-	for first := 0; first < len(paths); first++ {
-		for second := first + 1; second < len(paths); second++ {
-			if pathsOverlap(paths[first].path, paths[second].path) {
-				return fmt.Errorf(
-					"%s %q overlaps %s %q",
-					paths[first].kind, paths[first].name,
-					paths[second].kind, paths[second].name,
-				)
-			}
-		}
-	}
-	if strings.ContainsRune(c.Verify.Command[0], filepath.Separator) {
-		verifier := c.Verify.Command[0]
-		if !filepath.IsAbs(verifier) {
-			verifier = filepath.Join(c.BaseDir, verifier)
-		}
-		resolved, err := filepath.EvalSymlinks(verifier)
-		if err != nil {
-			return fmt.Errorf("resolve verifier executable %q: %w", verifier, err)
-		}
-		info, err := os.Stat(resolved)
-		if err != nil {
-			return fmt.Errorf("inspect verifier executable: %w", err)
-		}
-		if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
-			return fmt.Errorf("verifier executable %q is not an executable file", verifier)
-		}
-		for name, candidate := range c.Candidates {
-			if pathWithin(resolved, candidate) {
-				return fmt.Errorf("verifier executable is inside candidate %q", name)
-			}
-		}
+	if pathWithin(executable, candidate) {
+		return fmt.Errorf("%s executable is inside candidate", label)
 	}
 	return nil
 }

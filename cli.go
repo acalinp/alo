@@ -77,7 +77,7 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	result, err := StartRun(ctx, config, RunOptions{Stdout: stdout, Stderr: stderr})
+	result, err := StartRun(ctx, config, RunOptions{Stdout: stdout})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 	}
@@ -93,7 +93,7 @@ func resumeCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintln(stderr, "usage: alo resume RUN_ID")
 		return 2
 	}
-	result, err := ResumeRun(ctx, args[0], RunOptions{Stdout: stdout, Stderr: stderr})
+	result, err := ResumeRun(ctx, args[0], RunOptions{Stdout: stdout})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 	}

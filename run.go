@@ -16,8 +16,7 @@ import (
 type RunOptions struct {
 	StateDir string
 	Stdout   io.Writer
-	Stderr   io.Writer
-	Agent    AgentRunner
+	Runtime  Runtime
 }
 
 type RunResult struct {
@@ -33,11 +32,11 @@ func StartRun(ctx context.Context, config *Config, options RunOptions) (RunResul
 	if err := config.Validate(); err != nil {
 		return RunResult{ExitCode: 2}, err
 	}
-	agent := options.Agent
-	if agent == nil {
-		agent = NewPodmanAgent(options.Stdout)
+	runtime := options.Runtime
+	if runtime == nil {
+		runtime = NewPodmanAgent(options.Stdout)
 	}
-	imageID, err := agent.ResolveImage(ctx)
+	imageID, err := runtime.ResolveImage(ctx)
 	if err != nil {
 		return RunResult{ExitCode: 2}, err
 	}
@@ -57,13 +56,14 @@ func StartRun(ctx context.Context, config *Config, options RunOptions) (RunResul
 		return RunResult{ID: id, ExitCode: 2}, err
 	}
 	state := &RunState{
-		ID:        id,
-		ConfigDir: config.BaseDir,
-		Status:    StatusPreparing,
-		Attempt:   1,
-		Phase:     PhaseVerify,
-		ImageID:   imageID,
-		Outputs:   make(map[string]OutputRecord),
+		ID:           id,
+		ConfigDir:    config.BaseDir,
+		Status:       StatusPreparing,
+		Attempt:      1,
+		Phase:        PhasePrepare,
+		ExerciseExit: -1,
+		ImageID:      imageID,
+		Outputs:      make(map[string]OutputRecord),
 	}
 	if err := writeStoredConfig(store.ConfigPath, config); err != nil {
 		return RunResult{ID: id, ExitCode: 2, State: state}, err
@@ -71,7 +71,7 @@ func StartRun(ctx context.Context, config *Config, options RunOptions) (RunResul
 	if err := store.Save(state); err != nil {
 		return RunResult{ID: id, ExitCode: 2, State: state}, err
 	}
-	return executeRun(ctx, config, state, store, agent, options)
+	return executeRun(ctx, config, state, store, runtime, options)
 }
 
 func ResumeRun(ctx context.Context, id string, options RunOptions) (RunResult, error) {
@@ -95,7 +95,7 @@ func ResumeRun(ctx context.Context, id string, options RunOptions) (RunResult, e
 	if state.Status == StatusSucceeded {
 		return RunResult{ID: id, ExitCode: 0, State: state}, nil
 	}
-	if state.Status == StatusFailed && state.Attempt >= 1 {
+	if state.Status == StatusFailed {
 		return RunResult{ID: id, ExitCode: 1, State: state}, nil
 	}
 	config, err := LoadConfig(store.ConfigPath)
@@ -109,11 +109,11 @@ func ResumeRun(ctx context.Context, id string, options RunOptions) (RunResult, e
 	if err := validateRunLayout(config, store); err != nil {
 		return RunResult{ID: id, ExitCode: 2, State: state}, err
 	}
-	agent := options.Agent
-	if agent == nil {
-		agent = NewPodmanAgent(options.Stdout)
+	runtime := options.Runtime
+	if runtime == nil {
+		runtime = NewPodmanAgent(options.Stdout)
 	}
-	return executeRun(ctx, config, state, store, agent, options)
+	return executeRun(ctx, config, state, store, runtime, options)
 }
 
 func executeRun(
@@ -121,7 +121,7 @@ func executeRun(
 	config *Config,
 	state *RunState,
 	store *RunStore,
-	agent AgentRunner,
+	runtime Runtime,
 	options RunOptions,
 ) (RunResult, error) {
 	stdout := options.Stdout
@@ -136,6 +136,37 @@ func executeRun(
 
 	for state.Attempt <= config.Attempts {
 		switch state.Phase {
+		case PhasePrepare:
+			fmt.Fprintf(stdout, "[%s] attempt %d/%d: preparing fixture\n", state.ID, state.Attempt, config.Attempts)
+			logPath, err := runPrepare(ctx, config, store, state.Attempt)
+			if err != nil {
+				if ctx.Err() != nil {
+					return stopRun(store, state, StatusStopped, 130, ctx.Err().Error(), "")
+				}
+				printFailedLog(stdout, logPath)
+				return stopRunWithError(store, state, err)
+			}
+			state.ExerciseExit = -1
+			state.Phase = PhaseExercise
+			if err := store.Save(state); err != nil {
+				return RunResult{ID: state.ID, ExitCode: 2, State: state}, err
+			}
+
+		case PhaseExercise:
+			fmt.Fprintf(stdout, "[%s] attempt %d/%d: replaying candidate\n", state.ID, state.Attempt, config.Attempts)
+			result, err := exerciseCandidate(ctx, config, store, state, runtime, stdout)
+			if err != nil {
+				if ctx.Err() != nil {
+					return stopRun(store, state, StatusStopped, 130, ctx.Err().Error(), "")
+				}
+				return stopRunWithError(store, state, err)
+			}
+			state.ExerciseExit = result.ExitCode
+			state.Phase = PhaseVerify
+			if err := store.Save(state); err != nil {
+				return RunResult{ID: state.ID, ExitCode: 2, State: state}, err
+			}
+
 		case PhaseVerify:
 			fmt.Fprintf(stdout, "[%s] attempt %d/%d: verifier running\n", state.ID, state.Attempt, config.Attempts)
 			started := time.Now()
@@ -146,32 +177,28 @@ func executeRun(
 				}
 				return stopRunWithError(store, state, err)
 			}
-			switch result.Outcome {
-			case VerifySuccess:
-				state.Status = StatusSucceeded
-				state.Failure = ""
-				state.BlockedReason = ""
-				state.Outputs = result.Outputs
-				if err := store.Save(state); err != nil {
-					return RunResult{ID: state.ID, ExitCode: 2, State: state}, err
-				}
-				fmt.Fprintf(stdout, "[%s] verifier passed (%s)\n", state.ID, elapsed(started))
-				return RunResult{ID: state.ID, ExitCode: 0, State: state}, nil
-			case VerifyInfrastructureFailure:
+			if result.Outcome == VerifyInfrastructureFailure {
 				printFailedLog(stdout, result.LogPath)
 				fmt.Fprintf(stdout, "[%s] verifier infrastructure failure: %s\n", state.ID, result.Failure)
 				return stopRun(store, state, StatusStopped, 2, result.Failure, "")
-			case VerifyCandidateFailure:
-				state.Failure = result.Failure
-				fmt.Fprintf(stdout, "[%s] verifier rejected candidate (%s)\n", state.ID, elapsed(started))
-				if state.Attempt == config.Attempts {
-					printFailedLog(stdout, result.LogPath)
-					return stopRun(store, state, StatusFailed, 1, result.Failure, "")
-				}
-				state.Phase = PhaseAgent
-				if err := store.Save(state); err != nil {
-					return RunResult{ID: state.ID, ExitCode: 2, State: state}, err
-				}
+			}
+			if result.Outcome == VerifySuccess && state.ExerciseExit == 0 {
+				state.Outputs = result.Outputs
+				fmt.Fprintf(stdout, "[%s] candidate replay verified (%s)\n", state.ID, elapsed(started))
+				return finishRun(store, state, runtime, StatusSucceeded, 0, "")
+			}
+			state.Failure = result.Failure
+			if state.ExerciseExit != 0 {
+				state.Failure = fmt.Sprintf("candidate entrypoint exited with status %d", state.ExerciseExit)
+			}
+			fmt.Fprintf(stdout, "[%s] candidate rejected: %s\n", state.ID, state.Failure)
+			if state.Attempt == config.Attempts {
+				printFailedLog(stdout, result.LogPath)
+				return finishRun(store, state, runtime, StatusFailed, 1, state.Failure)
+			}
+			state.Phase = PhaseAgent
+			if err := store.Save(state); err != nil {
+				return RunResult{ID: state.ID, ExitCode: 2, State: state}, err
 			}
 
 		case PhaseAgent:
@@ -187,10 +214,10 @@ func executeRun(
 			if err != nil {
 				return stopRunWithError(store, state, err)
 			}
-			fmt.Fprintf(stdout, "[%s] attempt %d/%d: agent running\n", state.ID, state.Attempt, config.Attempts)
+			fmt.Fprintf(stdout, "[%s] attempt %d/%d: agent repairing candidate\n", state.ID, state.Attempt, config.Attempts)
 			started := time.Now()
 			agentContext, cancel := context.WithTimeout(ctx, time.Duration(config.Agent.Timeout))
-			agentResult, turnErr := agent.Turn(agentContext, AgentTurn{
+			agentResult, turnErr := runtime.Turn(agentContext, AgentTurn{
 				Config:      config,
 				Store:       store,
 				Attempt:     state.Attempt,
@@ -215,14 +242,12 @@ func executeRun(
 			}
 			if agentResult.BlockedReason != "" {
 				fmt.Fprintf(stdout, "[%s] agent blocked: %s\n", state.ID, agentResult.BlockedReason)
-				return stopRun(
-					store, state, StatusBlocked, 3,
-					state.Failure, agentResult.BlockedReason,
-				)
+				return stopRun(store, state, StatusBlocked, 3, state.Failure, agentResult.BlockedReason)
 			}
 			fmt.Fprintf(stdout, "[%s] agent completed (%s)\n", state.ID, elapsed(started))
 			state.Attempt++
-			state.Phase = PhaseVerify
+			state.Phase = PhasePrepare
+			state.ExerciseExit = -1
 			state.Failure = ""
 			state.BlockedReason = ""
 			if err := store.Save(state); err != nil {
@@ -233,7 +258,81 @@ func executeRun(
 			return stopRunWithError(store, state, fmt.Errorf("unknown run phase %q", state.Phase))
 		}
 	}
-	return stopRun(store, state, StatusFailed, 1, "attempt limit reached", "")
+	return finishRun(store, state, runtime, StatusFailed, 1, "attempt limit reached")
+}
+
+func exerciseCandidate(
+	ctx context.Context,
+	config *Config,
+	store *RunStore,
+	state *RunState,
+	runtime Runtime,
+	console io.Writer,
+) (ExerciseResult, error) {
+	attemptDir, err := store.EnsureAttempt(state.Attempt)
+	if err != nil {
+		return ExerciseResult{}, err
+	}
+	logPath, err := nextAvailablePath(attemptDir, "exercise.log")
+	if err != nil {
+		return ExerciseResult{}, err
+	}
+	entrypoint := filepath.Join(config.Candidate, ".alo", "run")
+	info, err := os.Stat(entrypoint)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		message := "candidate entrypoint .alo/run is missing or not executable\n"
+		if writeErr := os.WriteFile(logPath, []byte(message), 0o600); writeErr != nil {
+			return ExerciseResult{}, writeErr
+		}
+		return ExerciseResult{ExitCode: 126}, nil
+	}
+	exerciseContext, cancel := context.WithTimeout(ctx, time.Duration(config.Exercise.Timeout))
+	result, runErr := runtime.Exercise(exerciseContext, ExerciseTurn{
+		Config:  config,
+		Store:   store,
+		Attempt: state.Attempt,
+		ImageID: state.ImageID,
+		LogPath: logPath,
+		Console: console,
+	})
+	timedOut := errors.Is(exerciseContext.Err(), context.DeadlineExceeded)
+	cancel()
+	if ctx.Err() != nil {
+		return result, ctx.Err()
+	}
+	if timedOut && errors.Is(runErr, context.DeadlineExceeded) {
+		file, openErr := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
+		if openErr != nil {
+			return ExerciseResult{}, fmt.Errorf("open exercise log after timeout: %w", openErr)
+		}
+		_, writeErr := fmt.Fprintf(file, "candidate replay timed out after %s\n", time.Duration(config.Exercise.Timeout))
+		closeErr := file.Close()
+		if err := errors.Join(writeErr, closeErr); err != nil {
+			return ExerciseResult{}, fmt.Errorf("record exercise timeout: %w", err)
+		}
+		return ExerciseResult{ExitCode: 124}, nil
+	}
+	if runErr != nil {
+		return result, runErr
+	}
+	return result, nil
+}
+
+func finishRun(
+	store *RunStore,
+	state *RunState,
+	runtime Runtime,
+	status Status,
+	exitCode int,
+	failure string,
+) (RunResult, error) {
+	cleanupContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	cleanupErr := runtime.RemoveWorkshop(cleanupContext, store)
+	cancel()
+	if cleanupErr != nil {
+		return stopRunWithError(store, state, fmt.Errorf("remove agent workshop: %w", cleanupErr))
+	}
+	return stopRun(store, state, status, exitCode, failure, "")
 }
 
 func stopRun(
@@ -284,10 +383,8 @@ func validateRunLayout(config *Config, store *RunStore) error {
 	if strings.Contains(runPath, ",") {
 		return errors.New("run state path may not contain a comma")
 	}
-	for name, candidate := range config.Candidates {
-		if pathsOverlap(runPath, candidate) {
-			return fmt.Errorf("candidate %q overlaps run state %q", name, runPath)
-		}
+	if pathsOverlap(runPath, config.Candidate) {
+		return fmt.Errorf("candidate overlaps run state %q", runPath)
 	}
 	for name, reference := range config.References {
 		if pathsOverlap(runPath, reference) {
@@ -298,6 +395,9 @@ func validateRunLayout(config *Config, store *RunStore) error {
 }
 
 func printFailedLog(output io.Writer, path string) {
+	if path == "" {
+		return
+	}
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
 		return
@@ -307,7 +407,7 @@ func printFailedLog(output io.Writer, path string) {
 	if data[len(data)-1] != '\n' {
 		fmt.Fprintln(output)
 	}
-	fmt.Fprintln(output, "--- end verifier output ---")
+	fmt.Fprintln(output, "--- end output ---")
 }
 
 func elapsed(start time.Time) time.Duration {

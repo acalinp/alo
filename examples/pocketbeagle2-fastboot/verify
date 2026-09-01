@@ -1,82 +1,16 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-evidence=${ALO_EVIDENCE_DIR:?}
-serial=${ALO_PARAMETER_SERIAL:?}
-candidate=${ALO_CANDIDATE_AUTOMATION:?}
-attempt=${ALO_ATTEMPT:?}
-failure="no fastboot device is present"
-
-infrastructure() {
-	local message=$1
-	shift
-	if ! "$@"; then
-		echo "infrastructure failure: $message" >&2
-		exit 2
-	fi
-}
-
-# Success is deliberately implementation-blind. The agent may use any sources,
-# artifacts, or sequence it can justify; the verifier accepts only the endpoint.
 command -v fastboot >/dev/null || {
 	echo "infrastructure failure: missing host command fastboot" >&2
 	exit 2
 }
-if (( attempt > 1 )); then
-	if ! devices=$(fastboot devices -l); then
-		echo "infrastructure failure: fastboot enumeration failed" >&2
-		exit 2
-	fi
-	if [[ -n "$devices" ]]; then
-		if ! find "$candidate" -type f ! -name README.md -print -quit | grep -q .; then
-			failure="fastboot is present, but the candidate contains no durable solution"
-		else
-			printf '%s\n' "$devices"
-			exit 0
-		fi
-	fi
-fi
-
-# Record the state the failed attempt left behind, then put the board back at a
-# known physical starting point for the next agent turn. These are observations,
-# not a prescribed boot recipe.
-for command in lsusb stty timeout; do
-	command -v "$command" >/dev/null || {
-		echo "infrastructure failure: missing host command $command" >&2
-		exit 2
-	}
-done
-[[ -c "$serial" ]] || {
-	echo "infrastructure failure: serial device is unavailable: $serial" >&2
-	exit 2
-}
-infrastructure "cannot configure serial device $serial" \
-	stty -F "$serial" 115200 raw -echo -ixon -ixoff
-echo "USB devices before reset:"
-lsusb -v 2>&1 || true
-echo
-timeout --foreground 5s cat "$serial" >"$evidence/serial.log" 2>&1 &
-serial_pid=$!
-cleanup() {
-	kill "$serial_pid" 2>/dev/null || true
-	wait "$serial_pid" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-infrastructure "board reset failed" ./tools/reset.sh
-sleep 0.5
-
-echo "USB devices after reset:"
-lsusb -v 2>&1 || true
-
-set +e
-wait "$serial_pid"
-serial_status=$?
-set -e
-if (( serial_status != 0 && serial_status != 124 )); then
-	echo "infrastructure failure: serial capture exited with status $serial_status" >&2
+if ! devices=$(fastboot devices -l); then
+	echo "infrastructure failure: fastboot enumeration failed" >&2
 	exit 2
 fi
-
-echo "candidate failure: $failure" >&2
-exit 1
+if [[ -z "$devices" ]]; then
+	echo "candidate failure: no fastboot device is present" >&2
+	exit 1
+fi
+printf '%s\n' "$devices"

@@ -59,7 +59,7 @@ func runVerifier(
 	}
 	defer logFile.Close()
 
-	environment := verifierEnvironment(config, attempt, attemptDir, resultPath)
+	environment := trustedEnvironment(config, config.Verify.PassEnv, attempt, attemptDir, resultPath)
 	verifyContext, cancel := context.WithTimeout(ctx, time.Duration(config.Verify.Timeout))
 	commandResult, runErr := runProcess(
 		verifyContext,
@@ -82,9 +82,23 @@ func runVerifier(
 		result.Failure = fmt.Sprintf("verifier timed out after %s", time.Duration(config.Verify.Timeout))
 	case commandResult.ExitCode == 0:
 		result.Outcome = VerifySuccess
-		outputs, err := loadVerifierOutputs(resultPath, config.Candidates)
+		outputs, err := loadVerifierOutputs(resultPath, config.Candidate)
 		if err != nil {
 			return result, err
+		}
+		candidateOutputs, err := loadCandidateOutputs(config.Candidate)
+		if err != nil {
+			result.Outcome = VerifyCandidateFailure
+			result.Failure = "invalid candidate output manifest: " + err.Error()
+			return result, nil
+		}
+		for name, output := range candidateOutputs {
+			if _, exists := outputs[name]; exists {
+				result.Outcome = VerifyCandidateFailure
+				result.Failure = fmt.Sprintf("candidate output %q conflicts with verifier output", name)
+				return result, nil
+			}
+			outputs[name] = output
 		}
 		result.Outputs = outputs
 	case commandResult.ExitCode == 1:
@@ -97,25 +111,23 @@ func runVerifier(
 	return result, nil
 }
 
-func verifierEnvironment(config *Config, attempt int, evidenceDir, resultPath string) []string {
+func trustedEnvironment(config *Config, passEnv []string, attempt int, evidenceDir, resultPath string) []string {
 	names := []string{"HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "USER"}
-	names = append(names, config.Verify.PassEnv...)
+	names = append(names, passEnv...)
 	environment := selectedEnvironment(names)
 	environment = append(environment,
 		fmt.Sprintf("ALO_ATTEMPT=%d", attempt),
 		"ALO_EVIDENCE_DIR="+evidenceDir,
-		"ALO_RESULT="+resultPath,
 	)
+	if resultPath != "" {
+		environment = append(environment, "ALO_RESULT="+resultPath)
+	}
 	for _, name := range sortedKeys(config.Parameters) {
 		environment = append(environment,
 			"ALO_PARAMETER_"+environmentName(name)+"="+config.Parameters[name],
 		)
 	}
-	for _, name := range sortedKeys(config.Candidates) {
-		environment = append(environment,
-			"ALO_CANDIDATE_"+environmentName(name)+"="+config.Candidates[name],
-		)
-	}
+	environment = append(environment, "ALO_CANDIDATE="+config.Candidate)
 	for _, name := range sortedKeys(config.References) {
 		environment = append(environment,
 			"ALO_REFERENCE_"+environmentName(name)+"="+config.References[name],
@@ -140,7 +152,7 @@ func selectedEnvironment(names []string) []string {
 	return result
 }
 
-func loadVerifierOutputs(path string, candidates map[string]string) (map[string]OutputRecord, error) {
+func loadVerifierOutputs(path, candidate string) (map[string]OutputRecord, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return make(map[string]OutputRecord), nil
@@ -162,7 +174,7 @@ func loadVerifierOutputs(path string, candidates map[string]string) (map[string]
 		if !parameterNamePattern.MatchString(name) {
 			return nil, fmt.Errorf("output name %q must match %s", name, parameterNamePattern)
 		}
-		record, err := validateOutput(outputPath, candidates)
+		record, err := validateOutput(outputPath, candidate)
 		if err != nil {
 			return nil, fmt.Errorf("output %q: %w", name, err)
 		}
@@ -171,7 +183,49 @@ func loadVerifierOutputs(path string, candidates map[string]string) (map[string]
 	return result, nil
 }
 
-func validateOutput(path string, candidates map[string]string) (OutputRecord, error) {
+func loadCandidateOutputs(candidate string) (map[string]OutputRecord, error) {
+	path := filepath.Join(candidate, ".alo", "outputs.json")
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return make(map[string]OutputRecord), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s must be a regular file, not a symlink", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var manifest verifyManifest
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", path, err)
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, fmt.Errorf("%s contains trailing JSON", path)
+	}
+	result := make(map[string]OutputRecord, len(manifest.Outputs))
+	for name, relative := range manifest.Outputs {
+		if !parameterNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("output name %q must match %s", name, parameterNamePattern)
+		}
+		if filepath.IsAbs(relative) {
+			return nil, fmt.Errorf("output %q path must be relative to the candidate", name)
+		}
+		record, err := validateOutput(filepath.Join(candidate, relative), candidate)
+		if err != nil {
+			return nil, fmt.Errorf("output %q: %w", name, err)
+		}
+		result[name] = record
+	}
+	return result, nil
+}
+
+func validateOutput(path, candidate string) (OutputRecord, error) {
 	if !filepath.IsAbs(path) {
 		return OutputRecord{}, errors.New("path must be absolute")
 	}
@@ -179,19 +233,12 @@ func validateOutput(path string, candidates map[string]string) (OutputRecord, er
 	if err != nil {
 		return OutputRecord{}, fmt.Errorf("resolve path: %w", err)
 	}
-	contained := false
-	for _, root := range candidates {
-		resolvedRoot, err := filepath.EvalSymlinks(root)
-		if err != nil {
-			return OutputRecord{}, fmt.Errorf("resolve candidate root: %w", err)
-		}
-		if resolved == resolvedRoot || strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator)) {
-			contained = true
-			break
-		}
+	resolvedRoot, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return OutputRecord{}, fmt.Errorf("resolve candidate root: %w", err)
 	}
-	if !contained {
-		return OutputRecord{}, errors.New("path is outside every candidate")
+	if resolved != resolvedRoot && !strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator)) {
+		return OutputRecord{}, errors.New("path is outside the candidate")
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {

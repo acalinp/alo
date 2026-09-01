@@ -27,8 +27,10 @@ const (
 type Phase string
 
 const (
-	PhaseVerify Phase = "verify"
-	PhaseAgent  Phase = "agent"
+	PhasePrepare  Phase = "prepare"
+	PhaseExercise Phase = "exercise"
+	PhaseVerify   Phase = "verify"
+	PhaseAgent    Phase = "agent"
 )
 
 type OutputRecord struct {
@@ -43,6 +45,7 @@ type RunState struct {
 	Status        Status                  `json:"status"`
 	Attempt       int                     `json:"attempt"`
 	Phase         Phase                   `json:"phase"`
+	ExerciseExit  int                     `json:"exercise_exit"`
 	ImageID       string                  `json:"image_id"`
 	Failure       string                  `json:"failure,omitempty"`
 	BlockedReason string                  `json:"blocked_reason,omitempty"`

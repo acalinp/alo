@@ -3,19 +3,25 @@
 Alo is a predictable agent iteration loop:
 
 ```text
-trusted verifier -> failure evidence -> containerized agent -> new candidate -> verifier
+trusted prepare -> fresh candidate replay -> trusted verify
+                                              |
+                                    evidence on failure
+                                              v
+                                persistent agent workshop
+                                              |
+                                      repaired candidate
 ```
 
-The agent may edit source and build durable artifacts inside rootless Podman.
-Only the verifier can declare success. Candidate directories persist between
-turns; evidence and references are read-only; container scratch is disposable.
-Alo lazily builds and versions its own general-purpose agent toolbox—the loop
-author does not supply an image or agent command.
+The candidate owns an executable `.alo/run`. Alo resets or prepares the fixture,
+runs that entrypoint in a fresh rootless Podman container without model secrets,
+then lets a trusted verifier judge the observable result. Only a successful
+replay followed by a successful verifier can pass.
 
-The first worked example asks an agent to bring a PocketBeagle 2 from its reset
-state to fastboot. The fixed verifier checks only that endpoint; after failure
-it captures serial/USB evidence and resets the board. The agent gets explicit
-hardware access and must discover the procedure and build whatever it needs.
+On failure, an autonomous agent repairs the candidate inside a separate,
+run-scoped workshop. Its root filesystem, candidate, cache, and model session
+persist across turns, so it can install tools, build artifacts, and experiment.
+The next prepare step resets fixture state; workshop activity cannot cause
+success unless the candidate's `.alo/run` can repeat the relevant result.
 
 ## Commands
 
@@ -28,24 +34,22 @@ go build -o alo ./cmd/alo
 ./alo logs RUN_ID
 ```
 
-Configuration declares a goal, named candidate and reference directories, one
-verifier command, and an attempt limit. Alo uses rootless Podman 4.9 or newer;
-its managed toolbox base is fetched only when that toolbox must be built.
-The bundled agent currently uses Pi through OpenRouter and reads
-`OPENROUTER_API_KEY` from the host environment.
+Alo owns and lazily builds its agent toolbox; loop authors do not provide an
+image or agent command. The bundled agent currently uses Pi through OpenRouter
+and reads `OPENROUTER_API_KEY`. Candidate artifacts may be published through
+`.alo/outputs.json`; Alo confines them to the candidate and records their hashes.
 
-## Design rules for contributors and agents
+## Contributor rules
 
 - Keep Alo an iteration coordinator, not a workflow engine.
-- Make verifiers describe observable success and fixture reset, not a solution.
-- Let the agent choose builds and actions within explicitly granted devices.
-- Keep model providers, planning, and tools in Alo's managed agent toolbox.
-- Add no sandbox abstraction until a second backend is actually required.
-- Never let the agent edit the verifier or evidence.
-- Never let an agent response declare success.
-- Do not add model-based success judgments, action DAGs, watcher plugins, or
-  user-selectable agent images to the core.
-- Prefer one behavioral test over many tests of fields, formatting, or mocks.
+- Let `prepare` establish fixture state and collect facts, never prescribe a solution.
+- Keep `verify` a trusted observation of the goal; do not execute candidate code there.
+- Run candidate code only through the fresh, credential-free replay container.
+- Keep agent exploration in the persistent workshop and require `.alo/run` to reproduce it.
+- Never let an agent response, file count, or model judgment declare success.
+- Add no action DAGs, watcher plugins, or user-selectable task images to the core.
+- Prefer a few state-machine and sandbox-boundary tests over field-by-field tests.
 
-See [`examples/pocketbeagle2-fastboot`](examples/pocketbeagle2-fastboot) for the
-primary architecture example.
+The primary example asks Alo to discover how to bring up fastboot on a
+PocketBeagle 2 without embedding a boot recipe:
+[`examples/pocketbeagle2-fastboot`](examples/pocketbeagle2-fastboot).

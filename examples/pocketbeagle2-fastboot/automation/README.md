@@ -1,6 +1,5 @@
 # Candidate
 
-This deliberately empty workspace belongs to the agent. It should leave behind
-the source, automation, lock data, and artifacts needed to reproduce whatever
-solution it discovers. Large downloads, source trees, and build intermediates
-belong in `/cache`.
+This deliberately empty workspace belongs to the agent. It must discover the
+solution and leave behind an executable `.alo/run`, source, lock data, and any
+important artifacts. The interface is fixed; its implementation is not.

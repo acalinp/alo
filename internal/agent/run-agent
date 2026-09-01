@@ -2,6 +2,13 @@
 set -Eeuo pipefail
 
 request=${1:?request JSON path is required}
+environment=${2:?agent environment JSON path is required}
+
+while IFS= read -r name; do
+	value=$(jq -r --arg name "$name" '.[$name]' "$environment")
+	export "$name=$value"
+done < <(jq -r 'keys[]' "$environment")
+: > "$environment"
 
 prompt=$(node - "$request" <<'JS'
 const fs = require("fs");
@@ -11,11 +18,8 @@ const lines = [
   `Attempt: ${request.attempt}`,
   `Current evidence: ${request.evidence}`,
   `Persistent build cache: ${request.cache}`,
-  "Candidate directories:",
+  `Candidate workspace: ${request.candidate}`,
 ];
-for (const [name, path] of Object.entries(request.candidates)) {
-  lines.push(`- ${name}: ${path}`);
-}
 if (Object.keys(request.references || {}).length) {
   lines.push("Read-only references:");
   for (const [name, path] of Object.entries(request.references)) {
@@ -26,12 +30,13 @@ if ((request.devices || []).length) {
   lines.push("Hardware made available inside this container:");
   for (const path of request.devices) lines.push(`- ${path}`);
 }
-lines.push("Inspect the evidence and references, then build or repair the candidate and report what you changed.");
+lines.push("Inspect the evidence and references, then build or repair the candidate and its executable .alo/run replay entrypoint.");
 process.stdout.write(lines.join("\n"));
 JS
 )
 
 transcript=$(mktemp)
+trap 'rm -f "$transcript"' EXIT
 set +e
 pi \
 	--provider openrouter \
