@@ -247,7 +247,7 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn AgentTurn) (AgentResult, er
 	if console == nil {
 		console = p.console()
 	}
-	progress := newTerminalProgress(console, fmt.Sprintf("[%s] agent working", turn.Store.ID))
+	progress := newTerminalProgress(console, turn.Store.ID)
 	tail := &tailBuffer{maximum: 64 << 10}
 	target := io.MultiWriter(logFile, progress, tail)
 	var secrets []string
@@ -255,11 +255,13 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn AgentTurn) (AgentResult, er
 		secrets = append(secrets, os.Getenv(variable))
 	}
 	redacted := newSecretRedactor(target, secrets)
+	stdoutStream := newAgentStreamWriter(redacted, progress)
+	stderrStream := newAgentStreamWriter(redacted, progress)
 
 	command := exec.Command(p.binary(), "start", "--attach", name)
 	command.Env = os.Environ()
-	command.Stdout = redacted
-	command.Stderr = redacted
+	command.Stdout = stdoutStream
+	command.Stderr = stderrStream
 	if err := command.Start(); err != nil {
 		return AgentResult{}, fmt.Errorf("start agent workshop: %w", err)
 	}
@@ -280,10 +282,10 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn AgentTurn) (AgentResult, er
 			_ = command.Process.Kill()
 			waitErr = <-waited
 		}
-		_ = redacted.Flush()
+		_ = flushAgentOutput(redacted, stdoutStream, stderrStream)
 		return AgentResult{}, errors.Join(ctx.Err(), cleanupErr, normalizeExitError(waitErr))
 	}
-	flushErr := redacted.Flush()
+	flushErr := flushAgentOutput(redacted, stdoutStream, stderrStream)
 	if waitErr == nil && flushErr == nil {
 		if reason := parseBlockedReason(tail.String()); reason != "" {
 			return AgentResult{BlockedReason: reason}, nil

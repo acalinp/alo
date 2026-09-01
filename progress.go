@@ -23,13 +23,15 @@ var progressFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "
 // retained log because this writer wraps only the console branch.
 type terminalProgress struct {
 	output io.Writer
-	label  string
+	runID  string
 	active bool
 
 	mu         sync.Mutex
 	started    bool
-	startedAt  time.Time
 	lastOutput time.Time
+	state      string
+	tool       string
+	stateSince time.Time
 	lineStart  bool
 	visible    bool
 	frame      int
@@ -37,18 +39,33 @@ type terminalProgress struct {
 	done       chan struct{}
 }
 
-func newTerminalProgress(output io.Writer, label string) *terminalProgress {
+func newTerminalProgress(output io.Writer, runID string) *terminalProgress {
 	now := time.Now()
 	return &terminalProgress{
 		output:     output,
-		label:      label,
+		runID:      runID,
 		active:     isTerminal(output),
-		startedAt:  now,
 		lastOutput: now,
+		state:      "working",
+		stateSince: now,
 		lineStart:  true,
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
 	}
+}
+
+func (p *terminalProgress) SetState(state, tool string) {
+	if !p.active {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state == state && p.tool == tool {
+		return
+	}
+	p.state = state
+	p.tool = tool
+	p.stateSince = time.Now()
 }
 
 func isTerminal(output io.Writer) bool {
@@ -118,14 +135,44 @@ func (p *terminalProgress) render(now time.Time) {
 	frame := progressFrames[p.frame%len(progressFrames)]
 	p.frame++
 	_, err := fmt.Fprintf(
-		p.output, "%s%s %s %s · silent %s",
+		p.output, "%s[%s] %s %s %s",
 		clearLine,
-		p.label,
+		p.runID,
+		p.description(),
 		frame,
-		progressDuration(now.Sub(p.startedAt)),
-		progressDuration(now.Sub(p.lastOutput)),
+		progressDuration(now.Sub(p.stateSince)),
 	)
 	p.visible = err == nil
+}
+
+func (p *terminalProgress) description() string {
+	switch p.state {
+	case "starting":
+		return "agent starting"
+	case "thinking":
+		return "agent thinking"
+	case "responding":
+		return "agent responding"
+	case "preparing":
+		return "agent preparing " + progressTool(p.tool)
+	case "running":
+		return "agent running " + progressTool(p.tool)
+	case "compacting":
+		return "agent compacting context"
+	case "retrying":
+		return "agent retrying"
+	case "finishing":
+		return "agent finishing"
+	default:
+		return "agent working"
+	}
+}
+
+func progressTool(tool string) string {
+	if tool == "" {
+		return "tool"
+	}
+	return tool
 }
 
 func (p *terminalProgress) clear() error {

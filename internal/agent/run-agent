@@ -1,62 +1,235 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
+#!/usr/bin/env node
 
-request=${1:?request JSON path is required}
-environment=${2:?agent environment JSON path is required}
+"use strict";
 
-while IFS= read -r name; do
-	value=$(jq -r --arg name "$name" '.[$name]' "$environment")
-	export "$name=$value"
-done < <(jq -r 'keys[]' "$environment")
-: > "$environment"
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const { StringDecoder } = require("node:string_decoder");
 
-prompt=$(node - "$request" <<'JS'
-const fs = require("fs");
-const request = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const lines = [
-  `Goal: ${request.goal}`,
-  `Attempt: ${request.attempt}`,
-  `Current evidence: ${request.evidence}`,
-  `Persistent build cache: ${request.cache}`,
-  `Candidate workspace: ${request.candidate}`,
+const [requestPath, environmentPath] = process.argv.slice(2);
+if (!requestPath || !environmentPath) {
+  process.stderr.write("usage: alo-agent REQUEST_JSON ENVIRONMENT_JSON\n");
+  process.exit(2);
+}
+
+function protocol(type, fields = {}) {
+  fs.writeSync(1, `${JSON.stringify({ v: 1, type, ...fields })}\n`);
+}
+
+function status(state, tool) {
+  protocol("status", tool ? { state, tool } : { state });
+}
+
+function diagnostic(text) {
+  if (!text) return;
+  protocol("diagnostic", { text: text.endsWith("\n") ? text : `${text}\n` });
+}
+
+function promptFor(request) {
+  const lines = [
+    `Goal: ${request.goal}`,
+    `Attempt: ${request.attempt}`,
+    `Current evidence: ${request.evidence}`,
+    `Persistent build cache: ${request.cache}`,
+    `Candidate workspace: ${request.candidate}`,
+  ];
+  if (Object.keys(request.references || {}).length) {
+    lines.push("Read-only references:");
+    for (const [name, path] of Object.entries(request.references)) {
+      lines.push(`- ${name}: ${path}`);
+    }
+  }
+  if ((request.devices || []).length) {
+    lines.push("Hardware made available inside this container:");
+    for (const path of request.devices) lines.push(`- ${path}`);
+  }
+  lines.push(
+    "Inspect the evidence and references, then build or repair the candidate and its executable .alo/run replay entrypoint.",
+  );
+  return lines.join("\n");
+}
+
+function textOf(message) {
+  if (!message || message.role !== "assistant") return "";
+  if (typeof message.content === "string") return message.content;
+  if (!Array.isArray(message.content)) return "";
+  return message.content
+    .filter((part) => part && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+function lastAssistant(messages) {
+  if (!Array.isArray(messages)) return undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "assistant") return messages[index];
+  }
+  return undefined;
+}
+
+function lineReader(onLine) {
+  const decoder = new StringDecoder("utf8");
+  let pending = "";
+  return {
+    write(chunk) {
+      pending += decoder.write(chunk);
+      for (;;) {
+        const newline = pending.indexOf("\n");
+        if (newline < 0) return;
+        const line = pending.slice(0, newline).replace(/\r$/, "");
+        pending = pending.slice(newline + 1);
+        onLine(line);
+      }
+    },
+    end() {
+      pending += decoder.end();
+      if (pending) onLine(pending.replace(/\r$/, ""));
+      pending = "";
+    },
+  };
+}
+
+let request;
+let suppliedEnvironment;
+try {
+  request = JSON.parse(fs.readFileSync(requestPath, "utf8"));
+  suppliedEnvironment = JSON.parse(fs.readFileSync(environmentPath, "utf8"));
+  fs.writeFileSync(environmentPath, "", { mode: 0o600 });
+} catch (error) {
+  diagnostic(`alo agent runner: ${error.message}`);
+  process.exit(1);
+}
+
+const args = [
+  "--provider", request.provider,
+  "--model", request.model,
+  "--thinking", request.thinking,
+  "--session-id", "alo",
+  "--session-dir", "/session",
+  "--no-context-files",
+  "--no-approve",
+  "--append-system-prompt", "/usr/local/share/alo-agent-instructions.md",
+  "--mode", "json",
+  "--",
+  promptFor(request),
 ];
-if (Object.keys(request.references || {}).length) {
-  lines.push("Read-only references:");
-  for (const [name, path] of Object.entries(request.references)) {
-    lines.push(`- ${name}: ${path}`);
+
+status("starting");
+const child = spawn("pi", args, {
+  env: { ...process.env, ...suppliedEnvironment },
+  stdio: ["ignore", "pipe", "pipe"],
+});
+
+let finalAssistant;
+let spawnError;
+
+function handleEvent(event) {
+  switch (event?.type) {
+    case "agent_start":
+    case "turn_start":
+      status("thinking");
+      break;
+    case "message_start":
+      if (event.message?.role === "assistant") status("thinking");
+      break;
+    case "message_update": {
+      const update = event.assistantMessageEvent;
+      if (!update) break;
+      if (update.type.startsWith("thinking_")) status("thinking");
+      else if (update.type.startsWith("text_")) status("responding");
+      else if (update.type.startsWith("toolcall_")) {
+        status("preparing", update.toolName);
+      }
+      break;
+    }
+    case "message_end":
+      if (event.message?.role === "assistant") finalAssistant = event.message;
+      break;
+    case "tool_execution_start":
+    case "tool_execution_update":
+      status("running", event.toolName);
+      break;
+    case "tool_execution_end":
+      status("thinking");
+      break;
+    case "compaction_start":
+    case "summarization_retry_scheduled":
+    case "summarization_retry_attempt_start":
+      status("compacting");
+      break;
+    case "compaction_end":
+    case "summarization_retry_finished":
+      status("thinking");
+      break;
+    case "auto_retry_start":
+      status("retrying");
+      break;
+    case "auto_retry_end":
+      status("thinking");
+      break;
+    case "turn_end":
+      status("finishing");
+      break;
+    case "agent_end":
+      finalAssistant = lastAssistant(event.messages) || finalAssistant;
+      status(event.willRetry ? "retrying" : "finishing");
+      break;
+    case "agent_settled":
+      status("finishing");
+      break;
   }
 }
-if ((request.devices || []).length) {
-  lines.push("Hardware made available inside this container:");
-  for (const path of request.devices) lines.push(`- ${path}`);
+
+const stdout = lineReader((line) => {
+  if (!line.trim()) return;
+  try {
+    handleEvent(JSON.parse(line));
+  } catch (error) {
+    diagnostic(`pi emitted invalid JSON: ${line}`);
+  }
+});
+const stderr = lineReader((line) => diagnostic(line));
+
+child.stdout.on("data", (chunk) => stdout.write(chunk));
+child.stdout.on("end", () => stdout.end());
+child.stderr.on("data", (chunk) => stderr.write(chunk));
+child.stderr.on("end", () => stderr.end());
+child.on("error", (error) => {
+  spawnError = error;
+});
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => {
+    if (!child.killed) child.kill(signal);
+  });
 }
-lines.push("Inspect the evidence and references, then build or repair the candidate and its executable .alo/run replay entrypoint.");
-process.stdout.write(lines.join("\n"));
-JS
-)
 
-provider=$(jq -er '.provider' "$request")
-model=$(jq -er '.model' "$request")
-thinking=$(jq -er '.thinking' "$request")
+child.on("close", (code, signal) => {
+  if (spawnError) {
+    diagnostic(`could not start pi: ${spawnError.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (code !== 0) {
+    diagnostic(signal ? `pi stopped by ${signal}` : `pi exited with status ${code}`);
+    process.exitCode = code || 1;
+    return;
+  }
+  if (!finalAssistant) {
+    diagnostic("pi finished without a final assistant message");
+    process.exitCode = 1;
+    return;
+  }
+  if (["error", "aborted"].includes(finalAssistant.stopReason)) {
+    diagnostic(finalAssistant.errorMessage || `pi stopped with reason ${finalAssistant.stopReason}`);
+    process.exitCode = 1;
+    return;
+  }
 
-transcript=$(mktemp)
-trap 'rm -f "$transcript"' EXIT
-set +e
-pi \
-	--provider "$provider" \
-	--model "$model" \
-	--thinking "$thinking" \
-	--session-id alo \
-	--session-dir /session \
-	--no-context-files \
-	--no-approve \
-	--append-system-prompt /usr/local/share/alo-agent-instructions.md \
-	-p "$prompt" | tee "$transcript"
-status=${PIPESTATUS[0]}
-set -e
-if (( status != 0 )); then
-	exit "$status"
-fi
-if tail -n 1 "$transcript" | grep -q '^ALO_BLOCKED:'; then
-	exit 3
-fi
+  const text = textOf(finalAssistant);
+  if (text) protocol("output", { text: text.endsWith("\n") ? text : `${text}\n` });
+  const lines = text.trimEnd().split("\n");
+  if (lines.at(-1)?.trimStart().startsWith("ALO_BLOCKED:")) {
+    process.exitCode = 3;
+  }
+});

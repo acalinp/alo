@@ -14,10 +14,11 @@ func TestTerminalProgressKeepsAnimationOutOfAgentStream(t *testing.T) {
 	now := time.Now()
 	progress := &terminalProgress{
 		output:     &console,
-		label:      "[run] agent working",
+		runID:      "run",
 		active:     true,
-		startedAt:  now.Add(-2 * time.Second),
 		lastOutput: now.Add(-2 * time.Second),
+		state:      "working",
+		stateSince: now.Add(-2 * time.Second),
 		lineStart:  true,
 	}
 	stream := io.MultiWriter(&retained, progress)
@@ -25,6 +26,17 @@ func TestTerminalProgressKeepsAnimationOutOfAgentStream(t *testing.T) {
 	progress.render(now)
 	if !strings.Contains(console.String(), "[run] agent working") {
 		t.Fatalf("progress output = %q", console.String())
+	}
+	progress.SetState("running", "bash")
+	stateSince := progress.stateSince
+	progress.SetState("running", "bash")
+	if !progress.stateSince.Equal(stateSince) {
+		t.Fatal("repeated status reset its elapsed time")
+	}
+	progress.lastOutput = now.Add(-2 * time.Second)
+	progress.render(now.Add(2 * time.Second))
+	if !strings.Contains(console.String(), "[run] agent running bash") {
+		t.Fatalf("stateful progress output = %q", console.String())
 	}
 	if _, err := io.WriteString(stream, "agent output"); err != nil {
 		t.Fatal(err)
