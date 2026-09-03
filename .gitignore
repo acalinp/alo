@@ -4,6 +4,10 @@
 # Accidental local copy of the generated PocketBeagle candidate.
 /examples/pocketbeagle2-fastboot/automation (Copy)/
 
+# The PocketBeagle candidate is populated by Alo runs; keep only its placeholder.
+/examples/pocketbeagle2-fastboot/automation/*
+!/examples/pocketbeagle2-fastboot/automation/README.md
+
 # Local credentials and environment overrides.
 .env
 .env.*
