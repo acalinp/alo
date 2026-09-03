@@ -311,6 +311,30 @@ func TestAgentZDRConfiguration(t *testing.T) {
 	}
 }
 
+func TestTrustedEnvironmentOmitsAttempt(t *testing.T) {
+	configuration := &config.Config{
+		Candidate:  "/candidate",
+		Parameters: map[string]string{"serial": "/dev/example"},
+		References: map[string]string{"facts": "/facts"},
+	}
+	environment := trustedEnvironment(configuration, nil, "/evidence", "/result")
+	joined := strings.Join(environment, "\n")
+	if strings.Contains(joined, "ALO_ATTEMPT=") {
+		t.Fatalf("attempt leaked into trusted environment: %q", environment)
+	}
+	for _, want := range []string{
+		"ALO_CANDIDATE=/candidate",
+		"ALO_EVIDENCE_DIR=/evidence",
+		"ALO_RESULT=/result",
+		"ALO_PARAMETER_SERIAL=/dev/example",
+		"ALO_REFERENCE_FACTS=/facts",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("environment does not contain %q: %q", want, environment)
+		}
+	}
+}
+
 func testConfig(base, candidate, verifier string) *config.Config {
 	config := &config.Config{
 		Version:    1,

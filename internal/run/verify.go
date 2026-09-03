@@ -61,7 +61,7 @@ func RunVerifier(
 	}
 	defer logFile.Close()
 
-	environment := trustedEnvironment(config, config.Verify.PassEnv, attempt, attemptDir, resultPath)
+	environment := trustedEnvironment(config, config.Verify.PassEnv, attemptDir, resultPath)
 	verifyContext, cancel := context.WithTimeout(ctx, time.Duration(config.Verify.Timeout))
 	commandResult, runErr := runProcess(
 		verifyContext,
@@ -113,14 +113,11 @@ func RunVerifier(
 	return result, nil
 }
 
-func trustedEnvironment(config *cfg.Config, passEnv []string, attempt int, evidenceDir, resultPath string) []string {
+func trustedEnvironment(config *cfg.Config, passEnv []string, evidenceDir, resultPath string) []string {
 	names := []string{"HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "USER"}
 	names = append(names, passEnv...)
 	environment := selectedEnvironment(names)
-	environment = append(environment,
-		fmt.Sprintf("ALO_ATTEMPT=%d", attempt),
-		"ALO_EVIDENCE_DIR="+evidenceDir,
-	)
+	environment = append(environment, "ALO_EVIDENCE_DIR="+evidenceDir)
 	if resultPath != "" {
 		environment = append(environment, "ALO_RESULT="+resultPath)
 	}

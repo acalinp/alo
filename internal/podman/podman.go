@@ -188,16 +188,13 @@ func (p *PodmanAgent) exerciseArguments(turn runpkg.ExerciseTurn, cidPath, name 
 		"--workdir", "/work/candidate",
 	)
 	args = append(args, referenceMounts(turn.Config.References)...)
-	args = append(args, exerciseEnvironment(turn.Config, turn.Attempt)...)
+	args = append(args, exerciseEnvironment(turn.Config)...)
 	args = append(args, turn.ImageID, "/work/candidate/.alo/run")
 	return args, nil
 }
 
-func exerciseEnvironment(configuration *config.Config, attempt int) []string {
-	args := []string{
-		"--env", fmt.Sprintf("ALO_ATTEMPT=%d", attempt),
-		"--env", "ALO_CANDIDATE=/work/candidate",
-	}
+func exerciseEnvironment(configuration *config.Config) []string {
+	var args []string
 	for _, name := range sortedKeys(configuration.Parameters) {
 		args = append(args, "--env", "ALO_PARAMETER_"+config.EnvironmentName(name)+"="+configuration.Parameters[name])
 	}

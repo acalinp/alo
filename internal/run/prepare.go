@@ -33,7 +33,7 @@ func RunPrepare(ctx context.Context, config *config.Config, store *RunStore, att
 		prepareContext,
 		config.BaseDir,
 		config.Prepare.Command,
-		trustedEnvironment(config, config.Prepare.PassEnv, attempt, attemptDir, ""),
+		trustedEnvironment(config, config.Prepare.PassEnv, attemptDir, ""),
 		logFile,
 		logFile,
 	)

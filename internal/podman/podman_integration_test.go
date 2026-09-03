@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"alo/internal/config"
@@ -132,6 +133,21 @@ func TestAgentRequestRetainsZDR(t *testing.T) {
 	request := agentRequest(configuration, runpkg.NewRunStore(t.TempDir(), "zdr-test"), 1)
 	if !request.ZDR {
 		t.Fatal("agent request did not retain ZDR enforcement")
+	}
+}
+
+func TestExerciseEnvironmentContainsOnlyConfiguredInputs(t *testing.T) {
+	configuration := &config.Config{
+		Parameters: map[string]string{"serial": "/dev/example"},
+		References: map[string]string{"facts": "/host/facts"},
+	}
+	got := exerciseEnvironment(configuration)
+	want := []string{
+		"--env", "ALO_PARAMETER_SERIAL=/dev/example",
+		"--env", "ALO_REFERENCE_FACTS=/refs/facts",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("environment = %#v, want %#v", got, want)
 	}
 }
 
