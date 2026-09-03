@@ -115,8 +115,8 @@ func resumeCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 }
 
 func logsCommand(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: alo logs RUN_ID")
+	if len(args) < 1 || len(args) > 2 {
+		fmt.Fprintln(stderr, "usage: alo logs RUN_ID [FILE]")
 		return 2
 	}
 	if err := runpkg.ValidateRunID(args[0]); err != nil {
@@ -124,6 +124,9 @@ func logsCommand(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	store := runpkg.NewRunStore(runpkg.DefaultStateRoot(), args[0])
+	if len(args) == 2 {
+		return showLogFile(store.AttemptsDir, args[1], stdout, stderr)
+	}
 	var paths []string
 	err := filepath.WalkDir(store.AttemptsDir, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -148,6 +151,39 @@ func logsCommand(args []string, stdout, stderr io.Writer) int {
 		relative, _ := filepath.Rel(store.AttemptsDir, path)
 		fmt.Fprintf(stdout, "%s\t%d bytes\n", relative, info.Size())
 	}
+	return 0
+}
+
+func showLogFile(root, name string, stdout, stderr io.Writer) int {
+	if filepath.IsAbs(name) {
+		fmt.Fprintln(stderr, "log file must be relative to the attempts directory")
+		return 2
+	}
+	path := filepath.Join(root, filepath.Clean(name))
+	relative, err := filepath.Rel(root, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		fmt.Fprintln(stderr, "log file is outside the attempts directory")
+		return 2
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if !info.Mode().IsRegular() {
+		fmt.Fprintln(stderr, "log file must be a regular file, not a symlink")
+		return 2
+	}
+	if !strings.HasSuffix(path, ".log") && !strings.HasSuffix(path, ".json") {
+		fmt.Fprintln(stderr, "log file must end in .log or .json")
+		return 2
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	_, _ = stdout.Write(data)
 	return 0
 }
 
@@ -185,5 +221,5 @@ Usage:
   alo try verify [FILE]
   alo run [FILE]
   alo resume RUN_ID
-  alo logs RUN_ID`)
+  alo logs RUN_ID [FILE]`)
 }

@@ -35,7 +35,7 @@ go build -o alo ./cmd/alo
 ./alo try verify [FILE]
 ./alo run [FILE]
 ./alo resume RUN_ID
-./alo logs RUN_ID
+./alo logs RUN_ID [FILE]
 ```
 
 `alo auth set openrouter` reads the API key without displaying it and stores it
@@ -46,6 +46,9 @@ candidate replay. `agent.pass_env` remains available for custom providers and
 explicit environment-based credentials.
 On Linux, this uses the desktop Secret Service provided by tools such as GNOME
 Keyring or KWallet.
+
+`alo logs RUN_ID` lists retained attempt files. Pass one listed path, such as
+`alo logs RUN_ID 0001/prepare.log`, to print its contents.
 
 `alo init` creates a starter `alo.yaml`, executable `prepare` and `verify`
 scripts, and a candidate directory. Use `alo try prepare` or `alo try verify`

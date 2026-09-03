@@ -14,7 +14,7 @@ sandbox:
 
 agent:
   provider: openrouter
-  model: openai/gpt-5.6-sol
+  model: google/gemini-3.8-flash
   thinking: medium
   zdr: true
   timeout: 30m

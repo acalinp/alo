@@ -11,6 +11,7 @@ import (
 
 	"alo/internal/auth"
 	"alo/internal/config"
+	runpkg "alo/internal/run"
 )
 
 func TestInitCommandCreatesValidStarterFiles(t *testing.T) {
@@ -30,7 +31,7 @@ func TestInitCommandCreatesValidStarterFiles(t *testing.T) {
 	if loaded.Name != "demo" || loaded.Goal != "Produce a result file." || loaded.Candidate != filepath.Join(root, "workspace") {
 		t.Fatalf("generated config = %#v", loaded)
 	}
-	if loaded.Agent.Provider != "openrouter" || loaded.Agent.Model != "openai/gpt-5.6-sol" ||
+	if loaded.Agent.Provider != "openrouter" || loaded.Agent.Model != "google/gemini-3.8-flash" ||
 		loaded.Agent.Thinking != "high" || !loaded.Agent.ZDR || len(loaded.Agent.PassEnv) != 0 {
 		t.Fatalf("generated agent config = %#v", loaded.Agent)
 	}
@@ -145,7 +146,7 @@ func TestTryCommandsExplainOutcomesAndEvidence(t *testing.T) {
 printf evidence > "$ALO_EVIDENCE_DIR/serial.log"
 : > "$ALO_EVIDENCE_DIR/empty.log"
 `)
-	writeExecutable(t, root, "verify", "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, root, "verify", "#!/bin/sh\necho 'result was not ready' >&2\nexit 1\n")
 	config := `version: 1
 name: trial
 goal: Exercise trusted phases.
@@ -177,8 +178,67 @@ verify:
 		t.Fatalf("verify code = %d, stderr = %q", code, errorOutput.String())
 	}
 	if !strings.Contains(verifyOutput.String(), "verify rejected the candidate (exit 1)") ||
-		!strings.Contains(verifyOutput.String(), "verify.log\tempty") {
+		!strings.Contains(verifyOutput.String(), "output:\n  result was not ready") ||
+		!strings.Contains(verifyOutput.String(), "verify.log\t21 bytes") {
 		t.Fatalf("verify output = %q", verifyOutput.String())
+	}
+
+	writeExecutable(t, root, "failed-prepare", "#!/bin/sh\necho 'serial device is unavailable' >&2\nexit 2\n")
+	failedConfig := strings.Replace(config, "command: [./prepare]", "command: [./failed-prepare]", 1)
+	if err := os.WriteFile(configPath, []byte(failedConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var failedOutput bytes.Buffer
+	errorOutput.Reset()
+	if code := tryCommand(context.Background(), []string{"prepare", configPath}, &failedOutput, &errorOutput); code != 2 {
+		t.Fatalf("failed prepare code = %d", code)
+	}
+	if !strings.Contains(failedOutput.String(), "prepare failed: prepare exited with status 2\n\noutput:\n  serial device is unavailable") ||
+		!strings.Contains(failedOutput.String(), "prepare.log\t29 bytes") {
+		t.Fatalf("failed prepare output = %q", failedOutput.String())
+	}
+	if errorOutput.Len() != 0 {
+		t.Fatalf("failed prepare stderr = %q", errorOutput.String())
+	}
+}
+
+func TestLogsCommandListsAndDisplaysRetainedFiles(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("ALO_STATE_DIR", root)
+	store := runpkg.NewRunStore(root, "test-run")
+	if err := store.Create(); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.EnsureAttempt(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attempt, "prepare.log"), []byte("serial unavailable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	var errorOutput bytes.Buffer
+	if code := logsCommand([]string{"test-run"}, &output, &errorOutput); code != 0 ||
+		!strings.Contains(output.String(), "0001/prepare.log\t19 bytes") {
+		t.Fatalf("list code = %d, output = %q, stderr = %q", code, output.String(), errorOutput.String())
+	}
+	output.Reset()
+	if code := logsCommand([]string{"test-run", "0001/prepare.log"}, &output, &errorOutput); code != 0 || output.String() != "serial unavailable\n" {
+		t.Fatalf("show code = %d, output = %q, stderr = %q", code, output.String(), errorOutput.String())
+	}
+}
+
+func TestLogsCommandRejectsPathsOutsideRun(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("ALO_STATE_DIR", root)
+	store := runpkg.NewRunStore(root, "test-run")
+	if err := store.Create(); err != nil {
+		t.Fatal(err)
+	}
+	var errorOutput bytes.Buffer
+	if code := logsCommand([]string{"test-run", "../state.json"}, io.Discard, &errorOutput); code != 2 ||
+		!strings.Contains(errorOutput.String(), "outside the attempts directory") {
+		t.Fatalf("code = %d, stderr = %q", code, errorOutput.String())
 	}
 }
 

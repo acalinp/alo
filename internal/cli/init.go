@@ -101,7 +101,7 @@ func initCommand(ctx context.Context, args []string, input io.Reader, output, er
 		Candidate: "./" + filepath.ToSlash(candidate),
 		Agent: initialAgentConfig{
 			Provider: "openrouter",
-			Model:    "openai/gpt-5.6-sol",
+			Model:    "google/gemini-3.8-flash",
 			Thinking: "high",
 			ZDR:      true,
 			Timeout:  "15m",
