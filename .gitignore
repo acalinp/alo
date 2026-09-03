@@ -1,6 +1,9 @@
 /alo
 /coverage.out
 
+# Accidental local copy of the generated PocketBeagle candidate.
+/examples/pocketbeagle2-fastboot/automation (Copy)/
+
 # Local credentials and environment overrides.
 .env
 .env.*
