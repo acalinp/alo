@@ -1,11 +1,13 @@
-package alo
+package cli
 
 import (
 	"context"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+
+	"alo/internal/config"
+	runpkg "alo/internal/run"
 )
 
 func tryCommand(ctx context.Context, args []string, output, errorOutput io.Writer) int {
@@ -17,7 +19,7 @@ func tryCommand(ctx context.Context, args []string, output, errorOutput io.Write
 	if len(args) == 2 {
 		path = args[1]
 	}
-	config, err := LoadConfig(path)
+	config, err := config.Load(path)
 	if err != nil {
 		fmt.Fprintln(errorOutput, err)
 		return 2
@@ -28,7 +30,7 @@ func tryCommand(ctx context.Context, args []string, output, errorOutput io.Write
 		return 2
 	}
 	defer os.RemoveAll(root)
-	store := NewRunStore(root, "try")
+	store := runpkg.NewRunStore(root, "try")
 	if err := store.Create(); err != nil {
 		fmt.Fprintln(errorOutput, err)
 		return 2
@@ -52,12 +54,12 @@ func tryCommand(ctx context.Context, args []string, output, errorOutput io.Write
 	return code
 }
 
-func tryPrepare(ctx context.Context, config *Config, store *RunStore, output, errorOutput io.Writer) int {
+func tryPrepare(ctx context.Context, config *config.Config, store *runpkg.RunStore, output, errorOutput io.Writer) int {
 	if config.Prepare == nil {
 		fmt.Fprintln(output, "prepare is not configured")
 		return 0
 	}
-	_, err := runPrepare(ctx, config, store, 1)
+	_, err := runpkg.RunPrepare(ctx, config, store, 1)
 	if err == nil {
 		fmt.Fprintln(output, "prepare succeeded")
 		return 0
@@ -70,8 +72,8 @@ func tryPrepare(ctx context.Context, config *Config, store *RunStore, output, er
 	return 2
 }
 
-func tryVerify(ctx context.Context, config *Config, store *RunStore, output, errorOutput io.Writer) int {
-	result, err := runVerifier(ctx, config, store, 1)
+func tryVerify(ctx context.Context, config *config.Config, store *runpkg.RunStore, output, errorOutput io.Writer) int {
+	result, err := runpkg.RunVerifier(ctx, config, store, 1)
 	if err != nil {
 		if ctx.Err() != nil {
 			fmt.Fprintln(errorOutput, "verify stopped:", ctx.Err())
@@ -81,13 +83,13 @@ func tryVerify(ctx context.Context, config *Config, store *RunStore, output, err
 		return 2
 	}
 	switch result.Outcome {
-	case VerifySuccess:
+	case runpkg.VerifySuccess:
 		fmt.Fprintln(output, "verify succeeded (exit 0)")
-		if summary := outputSummary(result.Outputs); summary != "" {
+		if summary := runpkg.OutputSummary(result.Outputs); summary != "" {
 			fmt.Fprintln(output, summary)
 		}
 		return 0
-	case VerifyCandidateFailure:
+	case runpkg.VerifyCandidateFailure:
 		fmt.Fprintln(output, "verify rejected the candidate (exit 1)")
 		return 1
 	default:
@@ -97,43 +99,13 @@ func tryVerify(ctx context.Context, config *Config, store *RunStore, output, err
 }
 
 func printTrialEvidence(output io.Writer, directory string) error {
-	files, err := evidenceFiles(directory)
+	files, err := runpkg.EvidenceFiles(directory)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(output, "evidence:")
 	for _, file := range files {
-		fmt.Fprintf(output, "  %s\t%s\n", file.Name, evidenceSize(file.Size))
+		fmt.Fprintf(output, "  %s\t%s\n", file.Name, runpkg.EvidenceSize(file.Size))
 	}
 	return nil
-}
-
-func evidenceFiles(directory string) ([]evidenceFile, error) {
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return nil, fmt.Errorf("list evidence: %w", err)
-	}
-	var files []evidenceFile
-	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
-			return nil, fmt.Errorf("inspect evidence %q: %w", entry.Name(), err)
-		}
-		if info.Mode().IsRegular() {
-			files = append(files, evidenceFile{Name: filepath.ToSlash(entry.Name()), Size: info.Size()})
-		}
-	}
-	return files, nil
-}
-
-type evidenceFile struct {
-	Name string
-	Size int64
-}
-
-func evidenceSize(size int64) string {
-	if size == 0 {
-		return "empty"
-	}
-	return fmt.Sprintf("%d bytes", size)
 }

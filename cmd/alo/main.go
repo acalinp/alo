@@ -3,9 +3,9 @@ package main
 import (
 	"os"
 
-	"alo"
+	"alo/internal/cli"
 )
 
 func main() {
-	os.Exit(alo.Main(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	os.Exit(cli.Main(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }

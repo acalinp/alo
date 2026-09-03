@@ -1,4 +1,4 @@
-package alo
+package run
 
 import (
 	"crypto/rand"
@@ -104,7 +104,7 @@ func NewRunID(now time.Time) (string, error) {
 	return now.UTC().Format("20060102-150405") + "-" + hex.EncodeToString(random), nil
 }
 
-func validateRunID(id string) error {
+func ValidateRunID(id string) error {
 	if !runIDPattern.MatchString(id) || id == "." || id == ".." {
 		return fmt.Errorf("invalid run ID %q", id)
 	}

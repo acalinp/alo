@@ -1,4 +1,4 @@
-package alo
+package cli
 
 import (
 	"context"
@@ -10,6 +10,10 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+
+	"alo/internal/config"
+	"alo/internal/podman"
+	runpkg "alo/internal/run"
 
 	"gopkg.in/yaml.v3"
 )
@@ -53,7 +57,7 @@ func validateCommand(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 {
 		path = args[0]
 	}
-	config, err := LoadConfig(path)
+	config, err := config.Load(path)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
@@ -76,12 +80,12 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	if len(args) == 1 {
 		path = args[0]
 	}
-	config, err := LoadConfig(path)
+	config, err := config.Load(path)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	result, err := StartRun(ctx, config, RunOptions{Stdout: stdout})
+	result, err := runpkg.Start(ctx, config, runpkg.RunOptions{Stdout: stdout, Runtime: podman.New(stdout)})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 	}
@@ -97,7 +101,7 @@ func resumeCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintln(stderr, "usage: alo resume RUN_ID")
 		return 2
 	}
-	result, err := ResumeRun(ctx, args[0], RunOptions{Stdout: stdout})
+	result, err := runpkg.Resume(ctx, args[0], runpkg.RunOptions{Stdout: stdout, Runtime: podman.New(stdout)})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 	}
@@ -113,11 +117,11 @@ func logsCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: alo logs RUN_ID")
 		return 2
 	}
-	if err := validateRunID(args[0]); err != nil {
+	if err := runpkg.ValidateRunID(args[0]); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	store := NewRunStore(DefaultStateRoot(), args[0])
+	store := runpkg.NewRunStore(runpkg.DefaultStateRoot(), args[0])
 	var paths []string
 	err := filepath.WalkDir(store.AttemptsDir, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -145,7 +149,7 @@ func logsCommand(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func printRunResult(output io.Writer, result RunResult) {
+func printRunResult(output io.Writer, result runpkg.RunResult) {
 	if result.ID != "" {
 		fmt.Fprintf(output, "run: %s\n", result.ID)
 	}
@@ -159,7 +163,7 @@ func printRunResult(output io.Writer, result RunResult) {
 	if result.State.BlockedReason != "" {
 		fmt.Fprintf(output, "blocked: %s\n", result.State.BlockedReason)
 	}
-	if summary := outputSummary(result.State.Outputs); summary != "" {
+	if summary := runpkg.OutputSummary(result.State.Outputs); summary != "" {
 		fmt.Fprintln(output, summary)
 	}
 	if result.ExitCode != 0 {

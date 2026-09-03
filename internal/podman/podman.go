@@ -1,10 +1,9 @@
-package alo
+package podman
 
 import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,9 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"alo/internal/agent"
+	"alo/internal/config"
+	runpkg "alo/internal/run"
 )
 
 type PodmanAgent struct {
@@ -26,16 +30,7 @@ type PodmanAgent struct {
 	commandOverride []string
 }
 
-//go:embed internal/agent/Containerfile
-var managedContainerfile []byte
-
-//go:embed internal/agent/run-agent
-var managedAgentRunner []byte
-
-//go:embed internal/agent/instructions.md
-var managedAgentInstructions []byte
-
-func NewPodmanAgent(console io.Writer) *PodmanAgent {
+func New(console io.Writer) *PodmanAgent {
 	return &PodmanAgent{Binary: "podman", Console: console}
 }
 
@@ -69,9 +64,9 @@ func (p *PodmanAgent) ResolveImage(ctx context.Context) (string, error) {
 
 func managedAgentImage() string {
 	hash := sha256.New()
-	_, _ = hash.Write(managedContainerfile)
-	_, _ = hash.Write(managedAgentRunner)
-	_, _ = hash.Write(managedAgentInstructions)
+	_, _ = hash.Write(agent.Containerfile())
+	_, _ = hash.Write(agent.Runner())
+	_, _ = hash.Write(agent.Instructions())
 	digest := hash.Sum(nil)
 	return "localhost/alo-agent:" + hex.EncodeToString(digest[:12])
 }
@@ -83,9 +78,9 @@ func (p *PodmanAgent) buildManagedImage(ctx context.Context, image string) error
 	}
 	defer os.RemoveAll(directory)
 	for name, asset := range map[string][]byte{
-		"Containerfile":   managedContainerfile,
-		"run-agent":       managedAgentRunner,
-		"instructions.md": managedAgentInstructions,
+		"Containerfile":   agent.Containerfile(),
+		"run-agent":       agent.Runner(),
+		"instructions.md": agent.Instructions(),
 	} {
 		mode := os.FileMode(0o644)
 		if name == "run-agent" {
@@ -152,13 +147,13 @@ func parsePodmanVersion(value string) (int, int, error) {
 	return major, minor, nil
 }
 
-func (p *PodmanAgent) Exercise(ctx context.Context, turn ExerciseTurn) (ExerciseResult, error) {
+func (p *PodmanAgent) Exercise(ctx context.Context, turn runpkg.ExerciseTurn) (runpkg.ExerciseResult, error) {
 	if turn.Config == nil || turn.Store == nil {
-		return ExerciseResult{}, errors.New("Podman exercise turn is incomplete")
+		return runpkg.ExerciseResult{}, errors.New("Podman exercise turn is incomplete")
 	}
 	logFile, err := os.OpenFile(turn.LogPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
-		return ExerciseResult{}, fmt.Errorf("create exercise log: %w", err)
+		return runpkg.ExerciseResult{}, fmt.Errorf("create exercise log: %w", err)
 	}
 	defer logFile.Close()
 	target := io.MultiWriter(logFile, writerOrDiscard(turn.Console))
@@ -166,17 +161,17 @@ func (p *PodmanAgent) Exercise(ctx context.Context, turn ExerciseTurn) (Exercise
 	cidPath := filepath.Join(filepath.Dir(turn.LogPath), "exercise.cid")
 	name := exerciseContainerName(turn.Store, turn.Attempt)
 	if err := p.removeStaleContainer(ctx, cidPath, name); err != nil {
-		return ExerciseResult{}, err
+		return runpkg.ExerciseResult{}, err
 	}
 	args, err := p.exerciseArguments(turn, cidPath, name)
 	if err != nil {
-		return ExerciseResult{}, err
+		return runpkg.ExerciseResult{}, err
 	}
 	exitCode, runErr := p.runEphemeral(ctx, args, cidPath, name, target)
-	return ExerciseResult{ExitCode: exitCode}, runErr
+	return runpkg.ExerciseResult{ExitCode: exitCode}, runErr
 }
 
-func (p *PodmanAgent) exerciseArguments(turn ExerciseTurn, cidPath, name string) ([]string, error) {
+func (p *PodmanAgent) exerciseArguments(turn runpkg.ExerciseTurn, cidPath, name string) ([]string, error) {
 	args := []string{
 		"run", "--rm", "--pull=never", "--http-proxy=false",
 		"--name", name,
@@ -198,49 +193,49 @@ func (p *PodmanAgent) exerciseArguments(turn ExerciseTurn, cidPath, name string)
 	return args, nil
 }
 
-func exerciseEnvironment(config *Config, attempt int) []string {
+func exerciseEnvironment(configuration *config.Config, attempt int) []string {
 	args := []string{
 		"--env", fmt.Sprintf("ALO_ATTEMPT=%d", attempt),
 		"--env", "ALO_CANDIDATE=/work/candidate",
 	}
-	for _, name := range sortedKeys(config.Parameters) {
-		args = append(args, "--env", "ALO_PARAMETER_"+environmentName(name)+"="+config.Parameters[name])
+	for _, name := range sortedKeys(configuration.Parameters) {
+		args = append(args, "--env", "ALO_PARAMETER_"+config.EnvironmentName(name)+"="+configuration.Parameters[name])
 	}
-	for _, name := range sortedKeys(config.References) {
-		args = append(args, "--env", "ALO_REFERENCE_"+environmentName(name)+"=/refs/"+name)
+	for _, name := range sortedKeys(configuration.References) {
+		args = append(args, "--env", "ALO_REFERENCE_"+config.EnvironmentName(name)+"=/refs/"+name)
 	}
 	return args
 }
 
-func (p *PodmanAgent) Turn(ctx context.Context, turn AgentTurn) (AgentResult, error) {
+func (p *PodmanAgent) Turn(ctx context.Context, turn runpkg.AgentTurn) (runpkg.AgentResult, error) {
 	if turn.Config == nil || turn.Store == nil {
-		return AgentResult{}, errors.New("Podman agent turn is incomplete")
+		return runpkg.AgentResult{}, errors.New("Podman agent turn is incomplete")
 	}
 	for _, name := range turn.Config.Agent.PassEnv {
 		if _, exists := os.LookupEnv(name); !exists {
-			return AgentResult{}, fmt.Errorf("agent environment variable %s is not set", name)
+			return runpkg.AgentResult{}, fmt.Errorf("agent environment variable %s is not set", name)
 		}
 	}
 	name := workshopContainerName(turn.Store)
 	if err := p.ensureWorkshop(ctx, turn, name); err != nil {
-		return AgentResult{}, err
+		return runpkg.AgentResult{}, err
 	}
 	request := agentRequest(turn.Config, turn.Store, turn.Attempt)
-	if err := writeAgentRequest(turn.RequestPath, request); err != nil {
-		return AgentResult{}, fmt.Errorf("write retained agent request: %w", err)
+	if err := runpkg.WriteAgentRequest(turn.RequestPath, request); err != nil {
+		return runpkg.AgentResult{}, fmt.Errorf("write retained agent request: %w", err)
 	}
 	stableRequest := filepath.Join(turn.Store.SessionDir, "request.json")
-	if err := writeWorkshopRequest(stableRequest, request); err != nil {
-		return AgentResult{}, fmt.Errorf("write workshop request: %w", err)
+	if err := runpkg.WriteWorkshopRequest(stableRequest, request); err != nil {
+		return runpkg.AgentResult{}, fmt.Errorf("write workshop request: %w", err)
 	}
 	environmentPath := filepath.Join(turn.Store.SessionDir, "agent-env.json")
 	if err := writeAgentEnvironment(environmentPath, turn.Config.Agent.PassEnv); err != nil {
-		return AgentResult{}, err
+		return runpkg.AgentResult{}, err
 	}
 	defer os.Remove(environmentPath)
 	logFile, err := os.OpenFile(turn.LogPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
-		return AgentResult{}, fmt.Errorf("create agent log: %w", err)
+		return runpkg.AgentResult{}, fmt.Errorf("create agent log: %w", err)
 	}
 	defer logFile.Close()
 	console := turn.Console
@@ -264,7 +259,7 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn AgentTurn) (AgentResult, er
 	command.Stdout = stdoutStream
 	command.Stderr = stderrStream
 	if err := command.Start(); err != nil {
-		return AgentResult{}, fmt.Errorf("start agent workshop: %w", err)
+		return runpkg.AgentResult{}, fmt.Errorf("start agent workshop: %w", err)
 	}
 	progress.Start()
 	defer progress.Stop()
@@ -284,14 +279,14 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn AgentTurn) (AgentResult, er
 			waitErr = <-waited
 		}
 		_ = flushAgentOutput(redacted, stdoutStream, stderrStream)
-		return AgentResult{}, errors.Join(ctx.Err(), cleanupErr, normalizeExitError(waitErr))
+		return runpkg.AgentResult{}, errors.Join(ctx.Err(), cleanupErr, normalizeExitError(waitErr))
 	}
 	flushErr := flushAgentOutput(redacted, stdoutStream, stderrStream)
 	if waitErr == nil && flushErr == nil {
 		if reason := parseBlockedReason(tail.String()); reason != "" {
-			return AgentResult{BlockedReason: reason}, nil
+			return runpkg.AgentResult{BlockedReason: reason}, nil
 		}
-		return AgentResult{}, nil
+		return runpkg.AgentResult{}, nil
 	}
 	var exitError *exec.ExitError
 	if errors.As(waitErr, &exitError) && exitError.ExitCode() == 3 {
@@ -299,12 +294,12 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn AgentTurn) (AgentResult, er
 		if reason == "" {
 			reason = "agent reported a blocker"
 		}
-		return AgentResult{BlockedReason: reason}, flushErr
+		return runpkg.AgentResult{BlockedReason: reason}, flushErr
 	}
-	return AgentResult{}, errors.Join(fmt.Errorf("agent workshop failed: %w", waitErr), flushErr)
+	return runpkg.AgentResult{}, errors.Join(fmt.Errorf("agent workshop failed: %w", waitErr), flushErr)
 }
 
-func (p *PodmanAgent) ensureWorkshop(ctx context.Context, turn AgentTurn, name string) error {
+func (p *PodmanAgent) ensureWorkshop(ctx context.Context, turn runpkg.AgentTurn, name string) error {
 	exists, err := p.objectExists(ctx, "container", name)
 	if err != nil {
 		return err
@@ -331,7 +326,7 @@ func (p *PodmanAgent) ensureWorkshop(ctx context.Context, turn AgentTurn, name s
 	return nil
 }
 
-func (p *PodmanAgent) workshopCreateArguments(turn AgentTurn, name string) ([]string, error) {
+func (p *PodmanAgent) workshopCreateArguments(turn runpkg.AgentTurn, name string) ([]string, error) {
 	args := []string{
 		"create", "--pull=never", "--http-proxy=false",
 		"--name", name,
@@ -391,7 +386,7 @@ func replaceUntrustedFile(path string, data []byte) error {
 	return errors.Join(writeErr, closeErr)
 }
 
-func (p *PodmanAgent) RemoveWorkshop(ctx context.Context, store *RunStore) error {
+func (p *PodmanAgent) RemoveWorkshop(ctx context.Context, store *runpkg.RunStore) error {
 	if store == nil {
 		return nil
 	}
@@ -474,7 +469,7 @@ func (p *PodmanAgent) deviceArguments(devices []string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve device %q: %w", path, err)
 		}
-		if !pathWithin(resolved, "/dev") {
+		if !config.PathWithin(resolved, "/dev") {
 			return nil, fmt.Errorf("device %q resolves outside /dev", path)
 		}
 		info, err := os.Stat(resolved)
@@ -509,12 +504,12 @@ func podmanMount(source, target string, readOnly bool) string {
 	return "type=bind,src=" + source + ",target=" + target + "," + mode
 }
 
-func agentRequest(config *Config, store *RunStore, attempt int) AgentRequest {
+func agentRequest(config *config.Config, store *runpkg.RunStore, attempt int) runpkg.AgentRequest {
 	references := make(map[string]string, len(config.References))
 	for name := range config.References {
 		references[name] = "/refs/" + name
 	}
-	return AgentRequest{
+	return runpkg.AgentRequest{
 		Goal:       config.Goal,
 		Attempt:    attempt,
 		Provider:   config.Agent.Provider,
@@ -535,8 +530,8 @@ func parseBlockedReason(output string) string {
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	for index := len(lines) - 1; index >= 0; index-- {
 		line := strings.TrimSpace(lines[index])
-		if strings.HasPrefix(line, agentBlockedPrefix) {
-			reason := strings.TrimSpace(strings.TrimPrefix(line, agentBlockedPrefix))
+		if strings.HasPrefix(line, runpkg.AgentBlockedPrefix) {
+			reason := strings.TrimSpace(strings.TrimPrefix(line, runpkg.AgentBlockedPrefix))
 			if reason != "" {
 				return reason
 			}
@@ -545,11 +540,11 @@ func parseBlockedReason(output string) string {
 	return ""
 }
 
-func workshopContainerName(store *RunStore) string {
+func workshopContainerName(store *runpkg.RunStore) string {
 	return "alo-" + store.ID + "-workshop"
 }
 
-func exerciseContainerName(store *RunStore, attempt int) string {
+func exerciseContainerName(store *runpkg.RunStore, attempt int) string {
 	return fmt.Sprintf("alo-%s-%04d-exercise", store.ID, attempt)
 }
 
@@ -663,6 +658,15 @@ func writerOrDiscard(writer io.Writer) io.Writer {
 		return io.Discard
 	}
 	return writer
+}
+
+func sortedKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (p *PodmanAgent) output(ctx context.Context, args ...string) (string, error) {

@@ -1,12 +1,16 @@
-package alo
+package run
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"os"
+
+	"alo/internal/config"
 )
 
-const agentBlockedPrefix = "ALO_BLOCKED:"
+const AgentBlockedPrefix = "ALO_BLOCKED:"
 
 type AgentRequest struct {
 	Goal       string            `json:"goal"`
@@ -25,7 +29,7 @@ type AgentRequest struct {
 }
 
 type AgentTurn struct {
-	Config      *Config
+	Config      *config.Config
 	Store       *RunStore
 	Attempt     int
 	ImageID     string
@@ -39,7 +43,7 @@ type AgentResult struct {
 }
 
 type ExerciseTurn struct {
-	Config  *Config
+	Config  *config.Config
 	Store   *RunStore
 	Attempt int
 	ImageID string
@@ -58,7 +62,7 @@ type Runtime interface {
 	RemoveWorkshop(context.Context, *RunStore) error
 }
 
-func writeAgentRequest(path string, request AgentRequest) error {
+func WriteAgentRequest(path string, request AgentRequest) error {
 	data, err := encodeAgentRequest(request)
 	if err != nil {
 		return err
@@ -66,12 +70,25 @@ func writeAgentRequest(path string, request AgentRequest) error {
 	return atomicWrite(path, data, 0o600)
 }
 
-func writeWorkshopRequest(path string, request AgentRequest) error {
+func WriteWorkshopRequest(path string, request AgentRequest) error {
 	data, err := encodeAgentRequest(request)
 	if err != nil {
 		return err
 	}
 	return replaceUntrustedFile(path, data)
+}
+
+func replaceUntrustedFile(path string, data []byte) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write(data)
+	closeErr := file.Close()
+	return errors.Join(writeErr, closeErr)
 }
 
 func encodeAgentRequest(request AgentRequest) ([]byte, error) {

@@ -1,4 +1,4 @@
-package alo
+package run
 
 import (
 	"context"
@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"alo/internal/config"
 )
 
-func runPrepare(ctx context.Context, config *Config, store *RunStore, attempt int) (string, error) {
+func RunPrepare(ctx context.Context, config *config.Config, store *RunStore, attempt int) (string, error) {
 	if config.Prepare == nil {
 		return "", nil
 	}

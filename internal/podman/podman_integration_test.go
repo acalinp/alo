@@ -1,4 +1,4 @@
-package alo
+package podman
 
 import (
 	"context"
@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"alo/internal/config"
+	runpkg "alo/internal/run"
 )
 
 func TestRootlessPodmanReplayAndPersistentWorkshop(t *testing.T) {
@@ -29,7 +32,7 @@ if touch /refs/facts/forbidden 2>/dev/null; then exit 41; fi
 mkdir -p out
 printf replayed > out/replayed
 `)
-	store := NewRunStore(filepath.Join(root, "state"), "podman-test")
+	store := runpkg.NewRunStore(filepath.Join(root, "state"), "podman-test")
 	if err := store.Create(); err != nil {
 		t.Fatal(err)
 	}
@@ -40,18 +43,18 @@ printf replayed > out/replayed
 	if err := os.WriteFile(filepath.Join(attemptOne, "verify.log"), []byte("failure"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	config := &Config{
+	config := &config.Config{
 		Version:    1,
 		Name:       "podman-boundary",
 		Goal:       "Build an artifact.",
 		Candidate:  candidate,
 		References: map[string]string{"facts": reference},
-		Sandbox:    SandboxConfig{Devices: []string{"/dev/null"}},
-		Verify:     CommandConfig{Command: []string{"true"}},
+		Sandbox:    config.SandboxConfig{Devices: []string{"/dev/null"}},
+		Verify:     config.CommandConfig{Command: []string{"true"}},
 		Attempts:   3,
 		BaseDir:    root,
 	}
-	config.setDefaults()
+	config.SetDefaults()
 	workshopScript := `set -eu
 test -c /dev/null
 test "$(cat /refs/facts/fact)" = reference
@@ -68,14 +71,14 @@ if [ ! -f /tmp/workshop-root ]; then
 else
     printf second > /work/candidate/out/second-turn
 fi`
-	runtime := NewPodmanAgent(io.Discard)
+	runtime := New(io.Discard)
 	runtime.imageOverride = image
 	runtime.commandOverride = []string{"sh", "-c", workshopScript, "alo-test"}
 	imageID, err := runtime.ResolveImage(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = runtime.Exercise(context.Background(), ExerciseTurn{
+	_, err = runtime.Exercise(context.Background(), runpkg.ExerciseTurn{
 		Config: config, Store: store, Attempt: 1, ImageID: imageID,
 		LogPath: filepath.Join(attemptOne, "exercise.log"),
 	})
@@ -91,7 +94,7 @@ fi`
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = runtime.Turn(context.Background(), AgentTurn{
+		_, err = runtime.Turn(context.Background(), runpkg.AgentTurn{
 			Config: config, Store: store, Attempt: attempt, ImageID: imageID,
 			LogPath:     filepath.Join(attemptDir, "agent.log"),
 			RequestPath: filepath.Join(attemptDir, "request.json"),
@@ -116,5 +119,34 @@ fi`
 	exists, err := runtime.objectExists(context.Background(), "container", workshopContainerName(store))
 	if err != nil || exists {
 		t.Fatalf("workshop still exists: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestAgentRequestRetainsZDR(t *testing.T) {
+	configuration := &config.Config{
+		Goal:       "test",
+		Parameters: map[string]string{},
+		References: map[string]string{},
+		Agent:      config.AgentConfig{ZDR: true},
+	}
+	request := agentRequest(configuration, runpkg.NewRunStore(t.TempDir(), "zdr-test"), 1)
+	if !request.ZDR {
+		t.Fatal("agent request did not retain ZDR enforcement")
+	}
+}
+
+func writeCandidateEntrypoint(t *testing.T, candidate, content string) {
+	t.Helper()
+	directory := filepath.Join(candidate, ".alo")
+	mustMkdir(t, directory)
+	if err := os.WriteFile(filepath.Join(directory, "run"), []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustMkdir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
 	}
 }

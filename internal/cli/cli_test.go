@@ -1,4 +1,4 @@
-package alo
+package cli
 
 import (
 	"bytes"
@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"alo/internal/config"
 )
 
 func TestInitCommandCreatesValidStarterFiles(t *testing.T) {
@@ -20,12 +22,12 @@ func TestInitCommandCreatesValidStarterFiles(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", code, errorOutput.String())
 	}
-	config, err := LoadConfig(filepath.Join(root, "alo.yaml"))
+	loaded, err := config.Load(filepath.Join(root, "alo.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Name != "demo" || config.Goal != "Produce a result file." || config.Candidate != filepath.Join(root, "workspace") {
-		t.Fatalf("generated config = %#v", config)
+	if loaded.Name != "demo" || loaded.Goal != "Produce a result file." || loaded.Candidate != filepath.Join(root, "workspace") {
+		t.Fatalf("generated config = %#v", loaded)
 	}
 	for _, name := range []string{"prepare", "verify"} {
 		info, err := os.Stat(filepath.Join(root, name))
@@ -142,4 +144,20 @@ func withWorkingDirectory(t *testing.T, directory string) {
 			t.Error(err)
 		}
 	})
+}
+
+func writeExecutable(t *testing.T, directory, name, content string) string {
+	t.Helper()
+	path := filepath.Join(directory, name)
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func mustMkdir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
 }

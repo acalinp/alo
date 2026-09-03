@@ -1,4 +1,4 @@
-package alo
+package run
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	cfg "alo/internal/config"
 
 	"gopkg.in/yaml.v3"
 )
@@ -25,7 +27,7 @@ type RunResult struct {
 	State    *RunState
 }
 
-func StartRun(ctx context.Context, config *Config, options RunOptions) (RunResult, error) {
+func Start(ctx context.Context, config *cfg.Config, options RunOptions) (RunResult, error) {
 	if config == nil {
 		return RunResult{ExitCode: 2}, errors.New("configuration is nil")
 	}
@@ -34,7 +36,7 @@ func StartRun(ctx context.Context, config *Config, options RunOptions) (RunResul
 	}
 	runtime := options.Runtime
 	if runtime == nil {
-		runtime = NewPodmanAgent(options.Stdout)
+		return RunResult{ExitCode: 2}, errors.New("runtime is required")
 	}
 	imageID, err := runtime.ResolveImage(ctx)
 	if err != nil {
@@ -74,8 +76,8 @@ func StartRun(ctx context.Context, config *Config, options RunOptions) (RunResul
 	return executeRun(ctx, config, state, store, runtime, options)
 }
 
-func ResumeRun(ctx context.Context, id string, options RunOptions) (RunResult, error) {
-	if err := validateRunID(id); err != nil {
+func Resume(ctx context.Context, id string, options RunOptions) (RunResult, error) {
+	if err := ValidateRunID(id); err != nil {
 		return RunResult{ID: id, ExitCode: 2}, err
 	}
 	store := NewRunStore(stateRoot(options.StateDir), id)
@@ -98,7 +100,7 @@ func ResumeRun(ctx context.Context, id string, options RunOptions) (RunResult, e
 	if state.Status == StatusFailed {
 		return RunResult{ID: id, ExitCode: 1, State: state}, nil
 	}
-	config, err := LoadConfig(store.ConfigPath)
+	config, err := cfg.Load(store.ConfigPath)
 	if err != nil {
 		return RunResult{ID: id, ExitCode: 2, State: state}, err
 	}
@@ -111,14 +113,14 @@ func ResumeRun(ctx context.Context, id string, options RunOptions) (RunResult, e
 	}
 	runtime := options.Runtime
 	if runtime == nil {
-		runtime = NewPodmanAgent(options.Stdout)
+		return RunResult{ID: id, ExitCode: 2, State: state}, errors.New("runtime is required")
 	}
 	return executeRun(ctx, config, state, store, runtime, options)
 }
 
 func executeRun(
 	ctx context.Context,
-	config *Config,
+	config *cfg.Config,
 	state *RunState,
 	store *RunStore,
 	runtime Runtime,
@@ -138,7 +140,7 @@ func executeRun(
 		switch state.Phase {
 		case PhasePrepare:
 			fmt.Fprintf(stdout, "[%s] attempt %d/%d: preparing fixture\n", state.ID, state.Attempt, config.Attempts)
-			logPath, err := runPrepare(ctx, config, store, state.Attempt)
+			logPath, err := RunPrepare(ctx, config, store, state.Attempt)
 			if err != nil {
 				if ctx.Err() != nil {
 					return stopRun(store, state, StatusStopped, 130, ctx.Err().Error(), "")
@@ -170,7 +172,7 @@ func executeRun(
 		case PhaseVerify:
 			fmt.Fprintf(stdout, "[%s] attempt %d/%d: verifier running\n", state.ID, state.Attempt, config.Attempts)
 			started := time.Now()
-			result, err := runVerifier(ctx, config, store, state.Attempt)
+			result, err := RunVerifier(ctx, config, store, state.Attempt)
 			if err != nil {
 				if ctx.Err() != nil {
 					return stopRun(store, state, StatusStopped, 130, ctx.Err().Error(), "")
@@ -266,7 +268,7 @@ func executeRun(
 
 func exerciseCandidate(
 	ctx context.Context,
-	config *Config,
+	config *cfg.Config,
 	store *RunStore,
 	state *RunState,
 	runtime Runtime,
@@ -366,7 +368,7 @@ func stateRoot(configured string) string {
 	return DefaultStateRoot()
 }
 
-func writeStoredConfig(path string, config *Config) error {
+func writeStoredConfig(path string, config *cfg.Config) error {
 	data, err := yaml.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("encode stored configuration: %w", err)
@@ -377,7 +379,7 @@ func writeStoredConfig(path string, config *Config) error {
 	return nil
 }
 
-func validateRunLayout(config *Config, store *RunStore) error {
+func validateRunLayout(config *cfg.Config, store *RunStore) error {
 	runPath, err := filepath.EvalSymlinks(store.Dir)
 	if err != nil {
 		return fmt.Errorf("resolve run state path: %w", err)
@@ -386,11 +388,11 @@ func validateRunLayout(config *Config, store *RunStore) error {
 	if strings.Contains(runPath, ",") {
 		return errors.New("run state path may not contain a comma")
 	}
-	if pathsOverlap(runPath, config.Candidate) {
+	if cfg.PathsOverlap(runPath, config.Candidate) {
 		return fmt.Errorf("candidate overlaps run state %q", runPath)
 	}
 	for name, reference := range config.References {
-		if pathsOverlap(runPath, reference) {
+		if cfg.PathsOverlap(runPath, reference) {
 			return fmt.Errorf("reference %q overlaps run state %q", name, runPath)
 		}
 	}
@@ -414,12 +416,12 @@ func printFailedLog(output io.Writer, path string) {
 }
 
 func printEvidenceSummary(output io.Writer, runID, directory string) error {
-	files, err := evidenceFiles(directory)
+	files, err := EvidenceFiles(directory)
 	if err != nil {
 		return err
 	}
 	for _, file := range files {
-		fmt.Fprintf(output, "[%s] evidence: %s (%s)\n", runID, file.Name, evidenceSize(file.Size))
+		fmt.Fprintf(output, "[%s] evidence: %s (%s)\n", runID, file.Name, EvidenceSize(file.Size))
 	}
 	return nil
 }
@@ -432,7 +434,7 @@ func elapsed(start time.Time) time.Duration {
 	return result
 }
 
-func outputSummary(outputs map[string]OutputRecord) string {
+func OutputSummary(outputs map[string]OutputRecord) string {
 	var lines []string
 	for _, name := range sortedKeys(outputs) {
 		output := outputs[name]

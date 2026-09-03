@@ -8,7 +8,7 @@
 
 ## Execution Boundaries
 
-- Preserve the loop in `run.go`: trusted prepare, fresh candidate replay, trusted verify, then repair only after rejection. Success requires both replay exit 0 and verifier exit 0.
+- Preserve the loop in `internal/run/run.go`: trusted prepare, fresh candidate replay, trusted verify, then repair only after rejection. Success requires both replay exit 0 and verifier exit 0.
 - `.alo/run` is the candidate's executable replay contract. It runs in a fresh credential-free container; only the candidate is writable, references are read-only under `/refs/<name>`, and configured parameters/references arrive as `ALO_PARAMETER_*`/`ALO_REFERENCE_*`.
 - The repair workshop persists across turns (`candidate`, run-scoped `cache`, `session`, and container root), while replay does not. Do not let workshop-only state satisfy verification.
 - `prepare` and `verify` are trusted host executables and must remain outside the candidate. Verifier exit 1 means candidate rejection; any other nonzero exit or timeout is infrastructure failure.
@@ -16,8 +16,8 @@
 
 ## Change Hotspots
 
-- `config.go` uses strict YAML decoding and resolves relative candidate, reference, prepare, and verify paths against the config file directory. Preserve overlap, symlink, executable, device, and reserved `ALO_` environment checks.
-- `podman.go` embeds `internal/agent/{Containerfile,run-agent,instructions.md}`. Changing any embedded asset changes the content-derived managed image tag and causes a lazy rebuild.
-- `internal/agent/run-agent` emits a private line-delimited JSON protocol consumed by `agent_stream.go`. Status records drive TTY-only progress; only human output/diagnostics belong in retained logs, with passed credentials redacted.
+- `internal/config/config.go` uses strict YAML decoding and resolves relative candidate, reference, prepare, and verify paths against the config file directory. Preserve overlap, symlink, executable, device, and reserved `ALO_` environment checks.
+- `internal/podman/podman.go` hashes assets exposed by `internal/agent/assets.go`. Changing `internal/agent/{Containerfile,run-agent,instructions.md}` changes the managed image tag and causes a lazy rebuild.
+- `internal/agent/run-agent` emits a private line-delimited JSON protocol consumed by `internal/podman/agent_stream.go`. Status records drive TTY-only progress; only human output/diagnostics belong in retained logs, with passed credentials redacted.
 - Run state defaults to `$ALO_STATE_DIR`, then `$XDG_STATE_HOME/alo`, then `~/.local/state/alo`. Resumes use the stored config and pinned image ID; preserve phase persistence and run locking.
 - Candidate `.alo/outputs.json` uses candidate-relative regular-file paths. Verifier output written to `$ALO_RESULT` uses absolute paths; all outputs must resolve inside the candidate and are hashed after successful verification.

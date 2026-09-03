@@ -1,4 +1,4 @@
-package alo
+package run
 
 import (
 	"context"
@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	cfg "alo/internal/config"
 )
 
 type VerifyOutcome int
@@ -35,9 +37,9 @@ type verifyManifest struct {
 	Outputs map[string]string `json:"outputs,omitempty"`
 }
 
-func runVerifier(
+func RunVerifier(
 	ctx context.Context,
-	config *Config,
+	config *cfg.Config,
 	store *RunStore,
 	attempt int,
 ) (VerifyResult, error) {
@@ -111,7 +113,7 @@ func runVerifier(
 	return result, nil
 }
 
-func trustedEnvironment(config *Config, passEnv []string, attempt int, evidenceDir, resultPath string) []string {
+func trustedEnvironment(config *cfg.Config, passEnv []string, attempt int, evidenceDir, resultPath string) []string {
 	names := []string{"HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "USER"}
 	names = append(names, passEnv...)
 	environment := selectedEnvironment(names)
@@ -124,13 +126,13 @@ func trustedEnvironment(config *Config, passEnv []string, attempt int, evidenceD
 	}
 	for _, name := range sortedKeys(config.Parameters) {
 		environment = append(environment,
-			"ALO_PARAMETER_"+environmentName(name)+"="+config.Parameters[name],
+			"ALO_PARAMETER_"+cfg.EnvironmentName(name)+"="+config.Parameters[name],
 		)
 	}
 	environment = append(environment, "ALO_CANDIDATE="+config.Candidate)
 	for _, name := range sortedKeys(config.References) {
 		environment = append(environment,
-			"ALO_REFERENCE_"+environmentName(name)+"="+config.References[name],
+			"ALO_REFERENCE_"+cfg.EnvironmentName(name)+"="+config.References[name],
 		)
 	}
 	return environment
@@ -171,8 +173,8 @@ func loadVerifierOutputs(path, candidate string) (map[string]OutputRecord, error
 	}
 	result := make(map[string]OutputRecord, len(manifest.Outputs))
 	for name, outputPath := range manifest.Outputs {
-		if !parameterNamePattern.MatchString(name) {
-			return nil, fmt.Errorf("output name %q must match %s", name, parameterNamePattern)
+		if !cfg.ValidParameterName(name) {
+			return nil, fmt.Errorf("invalid output name %q", name)
 		}
 		record, err := validateOutput(outputPath, candidate)
 		if err != nil {
@@ -210,8 +212,8 @@ func loadCandidateOutputs(candidate string) (map[string]OutputRecord, error) {
 	}
 	result := make(map[string]OutputRecord, len(manifest.Outputs))
 	for name, relative := range manifest.Outputs {
-		if !parameterNamePattern.MatchString(name) {
-			return nil, fmt.Errorf("output name %q must match %s", name, parameterNamePattern)
+		if !cfg.ValidParameterName(name) {
+			return nil, fmt.Errorf("invalid output name %q", name)
 		}
 		if filepath.IsAbs(relative) {
 			return nil, fmt.Errorf("output %q path must be relative to the candidate", name)

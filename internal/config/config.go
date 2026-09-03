@@ -1,4 +1,4 @@
-package alo
+package config
 
 import (
 	"errors"
@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -93,7 +94,7 @@ func (d Duration) MarshalYAML() (any, error) {
 	return time.Duration(d).String(), nil
 }
 
-func LoadConfig(path string) (*Config, error) {
+func Load(path string) (*Config, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve configuration path: %w", err)
@@ -120,14 +121,14 @@ func LoadConfig(path string) (*Config, error) {
 
 	config.Path = absolute
 	config.BaseDir = filepath.Dir(absolute)
-	config.setDefaults()
+	config.SetDefaults()
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
 	return &config, nil
 }
 
-func (c *Config) setDefaults() {
+func (c *Config) SetDefaults() {
 	if c.Parameters == nil {
 		c.Parameters = make(map[string]string)
 	}
@@ -156,6 +157,15 @@ func (c *Config) setDefaults() {
 	if c.Prepare != nil && c.Prepare.Timeout == 0 {
 		c.Prepare.Timeout = Duration(defaultCommandTimeout)
 	}
+}
+
+func sortedKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (c *Config) resolvePaths() error {
@@ -322,10 +332,10 @@ func (c *Config) Validate() error {
 		if err := validateDirectory(fmt.Sprintf("reference %q", name), value); err != nil {
 			return err
 		}
-		if pathsOverlap(c.Candidate, value) {
+		if PathsOverlap(c.Candidate, value) {
 			return fmt.Errorf("candidate overlaps reference %q", name)
 		}
-		environment := environmentName(name)
+		environment := EnvironmentName(name)
 		if previous, exists := referenceEnvironmentNames[environment]; exists {
 			return fmt.Errorf("reference names %q and %q collide in verifier environment", previous, name)
 		}
@@ -334,7 +344,7 @@ func (c *Config) Validate() error {
 	referencePaths := sortedKeys(c.References)
 	for first := 0; first < len(referencePaths); first++ {
 		for second := first + 1; second < len(referencePaths); second++ {
-			if pathsOverlap(c.References[referencePaths[first]], c.References[referencePaths[second]]) {
+			if PathsOverlap(c.References[referencePaths[first]], c.References[referencePaths[second]]) {
 				return fmt.Errorf("references %q and %q overlap", referencePaths[first], referencePaths[second])
 			}
 		}
@@ -384,7 +394,7 @@ func validateDevices(devices []string) error {
 			return fmt.Errorf("sandbox device path %q may not contain a comma or colon", path)
 		}
 		path = filepath.Clean(path)
-		if path == "/dev" || !pathWithin(path, "/dev") {
+		if path == "/dev" || !PathWithin(path, "/dev") {
 			return fmt.Errorf("sandbox device path %q must name a specific path beneath /dev", path)
 		}
 		if seen[path] {
@@ -417,13 +427,13 @@ func validateTrustedExecutable(label, executable, candidate string) error {
 	if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
 		return fmt.Errorf("%s executable %q is not an executable file", label, executable)
 	}
-	if pathWithin(executable, candidate) {
+	if PathWithin(executable, candidate) {
 		return fmt.Errorf("%s executable is inside candidate", label)
 	}
 	return nil
 }
 
-func pathsOverlap(first, second string) bool {
+func PathsOverlap(first, second string) bool {
 	first = filepath.Clean(first)
 	second = filepath.Clean(second)
 	return first == second ||
@@ -431,12 +441,14 @@ func pathsOverlap(first, second string) bool {
 		strings.HasPrefix(second, first+string(filepath.Separator))
 }
 
-func pathWithin(path, root string) bool {
+func PathWithin(path, root string) bool {
 	path = filepath.Clean(path)
 	root = filepath.Clean(root)
 	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
-func environmentName(name string) string {
+func EnvironmentName(name string) string {
 	return strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 }
+
+func ValidParameterName(name string) bool { return parameterNamePattern.MatchString(name) }

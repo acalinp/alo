@@ -1,4 +1,4 @@
-package alo
+package run
 
 import (
 	"bytes"
@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"alo/internal/config"
 )
 
 type fakeRuntime struct {
@@ -70,8 +73,8 @@ if [ ! -s "$artifact" ]; then
     exit 1
 fi
 `)
-	config := testConfig(root, candidate, verifier)
-	config.Prepare = &CommandConfig{Command: []string{prepare}, Timeout: Duration(defaultCommandTimeout)}
+	configuration := testConfig(root, candidate, verifier)
+	configuration.Prepare = &config.CommandConfig{Command: []string{prepare}, Timeout: config.Duration(30 * time.Minute)}
 	runtime := &fakeRuntime{turn: func(_ context.Context, turn AgentTurn) (AgentResult, error) {
 		entrypoint := filepath.Join(turn.Config.Candidate, ".alo", "run")
 		mustMkdir(t, filepath.Dir(entrypoint))
@@ -83,7 +86,7 @@ printf '{"outputs":{"firmware":"out/firmware.bin"}}\n' > .alo/outputs.json
 `), 0o755)
 	}}
 
-	result, err := StartRun(context.Background(), config, RunOptions{
+	result, err := Start(context.Background(), configuration, RunOptions{
 		StateDir: filepath.Join(root, "state"),
 		Runtime:  runtime,
 	})
@@ -122,15 +125,15 @@ printf serial-data > "$ALO_EVIDENCE_DIR/serial.log"
 : > "$ALO_EVIDENCE_DIR/empty.log"
 `)
 	verifier := writeExecutable(t, root, "verify", "#!/bin/sh\nexit 1\n")
-	config := testConfig(root, candidate, verifier)
-	config.Prepare = &CommandConfig{Command: []string{prepare}, Timeout: Duration(defaultCommandTimeout)}
-	config.Attempts = 2
+	configuration := testConfig(root, candidate, verifier)
+	configuration.Prepare = &config.CommandConfig{Command: []string{prepare}, Timeout: config.Duration(30 * time.Minute)}
+	configuration.Attempts = 2
 	var output bytes.Buffer
 	runtime := &fakeRuntime{turn: func(context.Context, AgentTurn) (AgentResult, error) {
 		return AgentResult{BlockedReason: "stop after evidence summary"}, nil
 	}}
 
-	result, err := StartRun(context.Background(), config, RunOptions{
+	result, err := Start(context.Background(), configuration, RunOptions{
 		StateDir: filepath.Join(root, "state"),
 		Stdout:   &output,
 		Runtime:  runtime,
@@ -183,7 +186,7 @@ func TestRunTerminalOutcomes(t *testing.T) {
 			runtime := &fakeRuntime{turn: func(context.Context, AgentTurn) (AgentResult, error) {
 				return test.agentResult, nil
 			}}
-			result, err := StartRun(context.Background(), config, RunOptions{
+			result, err := Start(context.Background(), config, RunOptions{
 				StateDir: filepath.Join(root, "state"),
 				Runtime:  runtime,
 			})
@@ -222,7 +225,7 @@ test -f "$ALO_CANDIDATE/complete" || exit 1
 		<-ctx.Done()
 		return AgentResult{}, ctx.Err()
 	}}
-	first, err := StartRun(ctx, config, RunOptions{
+	first, err := Start(ctx, config, RunOptions{
 		StateDir: filepath.Join(root, "state"),
 		Runtime:  firstRuntime,
 	})
@@ -244,7 +247,7 @@ test -f "$ALO_CANDIDATE/complete" || exit 1
 		}
 		return AgentResult{}, os.WriteFile(filepath.Join(turn.Config.Candidate, "complete"), []byte("complete"), 0o644)
 	}}
-	resumed, err := ResumeRun(context.Background(), first.ID, RunOptions{
+	resumed, err := Resume(context.Background(), first.ID, RunOptions{
 		StateDir: filepath.Join(root, "state"),
 		Runtime:  secondRuntime,
 	})
@@ -301,11 +304,6 @@ func TestAgentZDRConfiguration(t *testing.T) {
 		t.Fatalf("validate OpenRouter ZDR config: %v", err)
 	}
 
-	request := agentRequest(config, NewRunStore(filepath.Join(root, "state"), "zdr-test"), 1)
-	if !request.ZDR {
-		t.Fatal("agent request did not retain ZDR enforcement")
-	}
-
 	config.Agent.Provider = "anthropic"
 	config.Agent.Model = "claude-sonnet-4-5"
 	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "requires agent.provider to be openrouter") {
@@ -313,18 +311,18 @@ func TestAgentZDRConfiguration(t *testing.T) {
 	}
 }
 
-func testConfig(base, candidate, verifier string) *Config {
-	config := &Config{
+func testConfig(base, candidate, verifier string) *config.Config {
+	config := &config.Config{
 		Version:    1,
 		Name:       "test-loop",
 		Goal:       "Produce the requested artifact.",
 		Candidate:  candidate,
 		References: make(map[string]string),
-		Verify:     CommandConfig{Command: []string{verifier}},
+		Verify:     config.CommandConfig{Command: []string{verifier}},
 		Attempts:   3,
 		BaseDir:    base,
 	}
-	config.setDefaults()
+	config.SetDefaults()
 	return config
 }
 

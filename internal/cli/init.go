@@ -1,4 +1,4 @@
-package alo
+package cli
 
 import (
 	"bufio"
@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"alo/internal/config"
 
 	"gopkg.in/yaml.v3"
 )
@@ -88,7 +90,7 @@ func initCommand(ctx context.Context, args []string, input io.Reader, output, er
 		return 2
 	}
 
-	config := initialConfig{
+	initial := initialConfig{
 		Version:   1,
 		Name:      name,
 		Goal:      goal,
@@ -97,7 +99,7 @@ func initCommand(ctx context.Context, args []string, input io.Reader, output, er
 		Prepare:   initialCommandConfig{Command: []string{"./prepare"}},
 		Verify:    initialCommandConfig{Command: []string{"./verify"}},
 	}
-	configData, err := yaml.Marshal(config)
+	configData, err := yaml.Marshal(initial)
 	if err != nil {
 		fmt.Fprintln(errorOutput, err)
 		return 2
@@ -147,7 +149,7 @@ func initCommand(ctx context.Context, args []string, input io.Reader, output, er
 		}
 		created = append(created, file.name)
 	}
-	if _, err := LoadConfig("alo.yaml"); err != nil {
+	if _, err := config.Load("alo.yaml"); err != nil {
 		cleanup()
 		fmt.Fprintln(errorOutput, "generated configuration is invalid:", err)
 		return 2
