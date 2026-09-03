@@ -206,6 +206,9 @@ func executeRun(
 			if err != nil {
 				return stopRunWithError(store, state, err)
 			}
+			if err := printEvidenceSummary(stdout, state.ID, attemptDir); err != nil {
+				return stopRunWithError(store, state, err)
+			}
 			logPath, err := nextAvailablePath(attemptDir, "agent.log")
 			if err != nil {
 				return stopRunWithError(store, state, err)
@@ -408,6 +411,17 @@ func printFailedLog(output io.Writer, path string) {
 		fmt.Fprintln(output)
 	}
 	fmt.Fprintln(output, "--- end output ---")
+}
+
+func printEvidenceSummary(output io.Writer, runID, directory string) error {
+	files, err := evidenceFiles(directory)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		fmt.Fprintf(output, "[%s] evidence: %s (%s)\n", runID, file.Name, evidenceSize(file.Size))
+	}
+	return nil
 }
 
 func elapsed(start time.Time) time.Duration {

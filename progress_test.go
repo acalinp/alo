@@ -16,6 +16,8 @@ func TestTerminalProgressKeepsAnimationOutOfAgentStream(t *testing.T) {
 		output:     &console,
 		runID:      "run",
 		active:     true,
+		startedAt:  now.Add(-5 * time.Second),
+		deadline:   now.Add(55 * time.Second),
 		lastOutput: now.Add(-2 * time.Second),
 		state:      "working",
 		stateSince: now.Add(-2 * time.Second),
@@ -26,6 +28,9 @@ func TestTerminalProgressKeepsAnimationOutOfAgentStream(t *testing.T) {
 	progress.render(now)
 	if !strings.Contains(console.String(), "[run] agent working") {
 		t.Fatalf("progress output = %q", console.String())
+	}
+	if !strings.Contains(console.String(), "5s elapsed · 55s remaining") {
+		t.Fatalf("progress timing = %q", console.String())
 	}
 	progress.SetState("running", "bash")
 	stateSince := progress.stateSince
@@ -56,5 +61,16 @@ func TestTerminalProgressKeepsAnimationOutOfAgentStream(t *testing.T) {
 	}
 	if strings.Contains(retained.String(), "agent working") || strings.Contains(retained.String(), "\x1b") {
 		t.Fatalf("animation leaked into retained output: %q", retained.String())
+	}
+}
+
+func TestTerminalProgressClampsExpiredDeadline(t *testing.T) {
+	now := time.Now()
+	progress := &terminalProgress{
+		startedAt: now.Add(-time.Minute),
+		deadline:  now.Add(-time.Second),
+	}
+	if got := progress.timing(now); got != "1m0s elapsed · 0s remaining" {
+		t.Fatalf("timing = %q", got)
 	}
 }

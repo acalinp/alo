@@ -50,7 +50,7 @@ func TestAgentStreamRoutesProtocolAndPlainText(t *testing.T) {
 }
 
 func TestAgentStreamBoundsRecords(t *testing.T) {
-	progress := newTerminalProgress(io.Discard, "run")
+	progress := newTerminalProgress(io.Discard, "run", time.Time{})
 	stream := newAgentStreamWriter(io.Discard, progress)
 	if _, err := stream.Write(bytes.Repeat([]byte{'x'}, maximumAgentRecord+1)); err == nil {
 		t.Fatal("oversized agent record was accepted")

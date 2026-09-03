@@ -247,7 +247,8 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn AgentTurn) (AgentResult, er
 	if console == nil {
 		console = p.console()
 	}
-	progress := newTerminalProgress(console, turn.Store.ID)
+	deadline, _ := ctx.Deadline()
+	progress := newTerminalProgress(console, turn.Store.ID, deadline)
 	tail := &tailBuffer{maximum: 64 << 10}
 	target := io.MultiWriter(logFile, progress, tail)
 	var secrets []string
@@ -519,6 +520,7 @@ func agentRequest(config *Config, store *RunStore, attempt int) AgentRequest {
 		Provider:   config.Agent.Provider,
 		Model:      config.Agent.Model,
 		Thinking:   config.Agent.Thinking,
+		ZDR:        config.Agent.ZDR,
 		Parameters: config.Parameters,
 		Candidate:  "/work/candidate",
 		References: references,

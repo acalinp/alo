@@ -14,6 +14,7 @@ type AgentRequest struct {
 	Provider   string            `json:"provider"`
 	Model      string            `json:"model"`
 	Thinking   string            `json:"thinking"`
+	ZDR        bool              `json:"zdr,omitempty"`
 	Parameters map[string]string `json:"parameters,omitempty"`
 	Candidate  string            `json:"candidate"`
 	References map[string]string `json:"references,omitempty"`

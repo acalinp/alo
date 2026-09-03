@@ -28,18 +28,27 @@ success unless the candidate's `.alo/run` can repeat the relevant result.
 ```bash
 go build -o alo ./cmd/alo
 
+./alo init
 ./alo validate [FILE]
+./alo try prepare [FILE]
+./alo try verify [FILE]
 ./alo run [FILE]
 ./alo resume RUN_ID
 ./alo logs RUN_ID
 ```
 
+`alo init` creates a starter `alo.yaml`, executable `prepare` and `verify`
+scripts, and a candidate directory. Use `alo try prepare` or `alo try verify`
+to run one trusted phase and inspect the evidence files it produced before
+starting the full loop.
+
 Alo owns and lazily builds its Pi-based agent toolbox; loop authors do not
 provide an image or agent command. `agent` selects the provider, model, thinking
-level, and credential environment names. Only explicitly named variables enter
-the workshop, and the resolved selection is retained with the run. Candidate
-artifacts may be published through `.alo/outputs.json`; Alo confines them to the
-candidate and records their hashes.
+level, privacy policy, and credential environment names. For OpenRouter,
+`zdr: true` restricts Pi to zero-data-retention endpoints. Only explicitly
+named variables enter the workshop, and the resolved selection is retained
+with the run. Candidate artifacts may be published through `.alo/outputs.json`;
+Alo confines them to the candidate and records their hashes.
 
 ## Contributor rules
 

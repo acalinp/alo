@@ -1,6 +1,7 @@
 package alo
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -108,6 +109,48 @@ printf '{"outputs":{"firmware":"out/firmware.bin"}}\n' > .alo/outputs.json
 	data, err := os.ReadFile(firstExercise)
 	if err != nil || !strings.Contains(string(data), ".alo/run is missing") {
 		t.Fatalf("first exercise evidence = %q, %v", data, err)
+	}
+}
+
+func TestRunSummarizesEvidenceBeforeAgentTurn(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	mustMkdir(t, candidate)
+	prepare := writeExecutable(t, root, "prepare", `#!/bin/sh
+set -eu
+printf serial-data > "$ALO_EVIDENCE_DIR/serial.log"
+: > "$ALO_EVIDENCE_DIR/empty.log"
+`)
+	verifier := writeExecutable(t, root, "verify", "#!/bin/sh\nexit 1\n")
+	config := testConfig(root, candidate, verifier)
+	config.Prepare = &CommandConfig{Command: []string{prepare}, Timeout: Duration(defaultCommandTimeout)}
+	config.Attempts = 2
+	var output bytes.Buffer
+	runtime := &fakeRuntime{turn: func(context.Context, AgentTurn) (AgentResult, error) {
+		return AgentResult{BlockedReason: "stop after evidence summary"}, nil
+	}}
+
+	result, err := StartRun(context.Background(), config, RunOptions{
+		StateDir: filepath.Join(root, "state"),
+		Stdout:   &output,
+		Runtime:  runtime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 3 {
+		t.Fatalf("exit code = %d", result.ExitCode)
+	}
+	for _, want := range []string{
+		"evidence: empty.log (empty)",
+		"evidence: prepare.log (empty)",
+		"evidence: serial.log (11 bytes)",
+		"evidence: exercise.log (",
+		"evidence: verify.log (empty)",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output does not contain %q:\n%s", want, output.String())
+		}
 	}
 }
 
@@ -244,6 +287,29 @@ func TestConfigRejectsUnsafeLayouts(t *testing.T) {
 	config.Sandbox.Devices = []string{root}
 	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "beneath /dev") {
 		t.Fatalf("unsafe device error = %v", err)
+	}
+}
+
+func TestAgentZDRConfiguration(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	mustMkdir(t, candidate)
+	verifier := writeExecutable(t, root, "verify", "#!/bin/sh\nexit 0\n")
+	config := testConfig(root, candidate, verifier)
+	config.Agent.ZDR = true
+	if err := config.Validate(); err != nil {
+		t.Fatalf("validate OpenRouter ZDR config: %v", err)
+	}
+
+	request := agentRequest(config, NewRunStore(filepath.Join(root, "state"), "zdr-test"), 1)
+	if !request.ZDR {
+		t.Fatal("agent request did not retain ZDR enforcement")
+	}
+
+	config.Agent.Provider = "anthropic"
+	config.Agent.Model = "claude-sonnet-4-5"
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "requires agent.provider to be openrouter") {
+		t.Fatalf("non-OpenRouter ZDR error = %v", err)
 	}
 }
 

@@ -53,6 +53,7 @@ type AgentConfig struct {
 	Provider string   `yaml:"provider,omitempty"`
 	Model    string   `yaml:"model,omitempty"`
 	Thinking string   `yaml:"thinking,omitempty"`
+	ZDR      bool     `yaml:"zdr,omitempty"`
 	PassEnv  []string `yaml:"pass_env,omitempty"`
 	Timeout  Duration `yaml:"timeout,omitempty"`
 }
@@ -279,6 +280,9 @@ func (c *Config) Validate() error {
 	}
 	if err := validateAgentValue("agent.model", c.Agent.Model); err != nil {
 		return err
+	}
+	if c.Agent.ZDR && c.Agent.Provider != "openrouter" {
+		return errors.New("agent.zdr requires agent.provider to be openrouter")
 	}
 	switch c.Agent.Thinking {
 	case "off", "minimal", "low", "medium", "high", "xhigh", "max":

@@ -22,8 +22,12 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "init":
+		return initCommand(ctx, args[1:], stdin, stdout, stderr)
 	case "validate":
 		return validateCommand(args[1:], stdout, stderr)
+	case "try":
+		return tryCommand(ctx, args[1:], stdout, stderr)
 	case "run":
 		return runCommand(ctx, args[1:], stdout, stderr)
 	case "resume":
@@ -168,7 +172,10 @@ func printUsage(output io.Writer) {
 	fmt.Fprintln(output, `Alo runs a trusted verifier and puts a containerized agent in its failure loop.
 
 Usage:
+  alo init
   alo validate [FILE]
+  alo try prepare [FILE]
+  alo try verify [FILE]
   alo run [FILE]
   alo resume RUN_ID
   alo logs RUN_ID`)

@@ -25,6 +25,44 @@ function diagnostic(text) {
   protocol("diagnostic", { text: text.endsWith("\n") ? text : `${text}\n` });
 }
 
+function configurePi(request) {
+  if (!request.zdr) return;
+  if (request.provider !== "openrouter") {
+    throw new Error("zdr requires the openrouter provider");
+  }
+  const directory = process.env.PI_CODING_AGENT_DIR;
+  if (!directory) {
+    throw new Error("PI_CODING_AGENT_DIR is not set");
+  }
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const path = `${directory}/models.json`;
+  const temporary = `${path}.${process.pid}.tmp`;
+  const config = {
+    providers: {
+      openrouter: {
+        compat: {
+          openRouterRouting: {
+            zdr: true,
+          },
+        },
+      },
+    },
+  };
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(config, null, 2)}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    fs.renameSync(temporary, path);
+  } finally {
+    try {
+      fs.unlinkSync(temporary);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+}
+
 function promptFor(request) {
   const lines = [
     `Goal: ${request.goal}`,
@@ -95,6 +133,7 @@ try {
   request = JSON.parse(fs.readFileSync(requestPath, "utf8"));
   suppliedEnvironment = JSON.parse(fs.readFileSync(environmentPath, "utf8"));
   fs.writeFileSync(environmentPath, "", { mode: 0o600 });
+  configurePi(request);
 } catch (error) {
   diagnostic(`alo agent runner: ${error.message}`);
   process.exit(1);

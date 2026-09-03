@@ -28,6 +28,8 @@ type terminalProgress struct {
 
 	mu         sync.Mutex
 	started    bool
+	startedAt  time.Time
+	deadline   time.Time
 	lastOutput time.Time
 	state      string
 	tool       string
@@ -39,12 +41,14 @@ type terminalProgress struct {
 	done       chan struct{}
 }
 
-func newTerminalProgress(output io.Writer, runID string) *terminalProgress {
+func newTerminalProgress(output io.Writer, runID string, deadline time.Time) *terminalProgress {
 	now := time.Now()
 	return &terminalProgress{
 		output:     output,
 		runID:      runID,
 		active:     isTerminal(output),
+		startedAt:  now,
+		deadline:   deadline,
 		lastOutput: now,
 		state:      "working",
 		stateSince: now,
@@ -140,9 +144,17 @@ func (p *terminalProgress) render(now time.Time) {
 		p.runID,
 		p.description(),
 		frame,
-		progressDuration(now.Sub(p.stateSince)),
+		p.timing(now),
 	)
 	p.visible = err == nil
+}
+
+func (p *terminalProgress) timing(now time.Time) string {
+	timing := progressDuration(now.Sub(p.startedAt)) + " elapsed"
+	if !p.deadline.IsZero() {
+		timing += " · " + progressDuration(p.deadline.Sub(now)) + " remaining"
+	}
+	return timing
 }
 
 func (p *terminalProgress) description() string {
