@@ -21,3 +21,4 @@
 - `internal/agent/run-agent` emits a private line-delimited JSON protocol consumed by `internal/podman/agent_stream.go`. Status records drive TTY-only progress; only human output/diagnostics belong in retained logs, with passed credentials redacted.
 - Run state defaults to `$ALO_STATE_DIR`, then `$XDG_STATE_HOME/alo`, then `~/.local/state/alo`. Resumes use the stored config and pinned image ID; preserve phase persistence and run locking.
 - Candidate `.alo/outputs.json` uses candidate-relative regular-file paths. Verifier output written to `$ALO_RESULT` uses absolute paths; all outputs must resolve inside the candidate and are hashed after successful verification.
+- OpenRouter credentials default to the OS keyring (`alo auth`), enter only the workshop, and must stay out of stored config and replay. Keep `agent.pass_env` for explicit custom-provider credentials.

@@ -8,7 +8,7 @@ agent-created `automation/.alo/run` in a fresh container with USB and serial
 access. The host verifier accepts only a visible fastboot device. A persistent
 agent workshop receives all failed prepare, replay, verifier, and serial logs.
 
-Set `OPENROUTER_API_KEY`, adjust `parameters.serial` and `AIL_GPIOCTL` when
+Run `alo auth set openrouter`, adjust `parameters.serial` and `AIL_GPIOCTL` when
 needed, then run:
 
 ```bash

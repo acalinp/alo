@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"alo/internal/auth"
 	"alo/internal/config"
 )
 
@@ -29,6 +30,10 @@ func TestInitCommandCreatesValidStarterFiles(t *testing.T) {
 	if loaded.Name != "demo" || loaded.Goal != "Produce a result file." || loaded.Candidate != filepath.Join(root, "workspace") {
 		t.Fatalf("generated config = %#v", loaded)
 	}
+	if loaded.Agent.Provider != "openrouter" || loaded.Agent.Model != "openai/gpt-5.6-sol" ||
+		loaded.Agent.Thinking != "high" || !loaded.Agent.ZDR || len(loaded.Agent.PassEnv) != 0 {
+		t.Fatalf("generated agent config = %#v", loaded.Agent)
+	}
 	for _, name := range []string{"prepare", "verify"} {
 		info, err := os.Stat(filepath.Join(root, name))
 		if err != nil {
@@ -43,6 +48,53 @@ func TestInitCommandCreatesValidStarterFiles(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "alo try prepare") {
 		t.Fatalf("output = %q", output.String())
+	}
+}
+
+func TestAuthCommandsManageCredentialWithoutPrintingIt(t *testing.T) {
+	previous := credentialStore
+	store := &memoryCredentialStore{values: make(map[string]string)}
+	credentialStore = store
+	t.Cleanup(func() { credentialStore = previous })
+	var output bytes.Buffer
+	var errorOutput bytes.Buffer
+
+	if code := authCommand(context.Background(), []string{"set", "openrouter"}, strings.NewReader("secret-key\n"), &output, &errorOutput); code != 0 {
+		t.Fatalf("set code = %d, stderr = %q", code, errorOutput.String())
+	}
+	if store.values["openrouter"] != "secret-key" || strings.Contains(output.String(), "secret-key") {
+		t.Fatalf("stored = %q, output = %q", store.values["openrouter"], output.String())
+	}
+	output.Reset()
+	if code := authCommand(context.Background(), []string{"status", "openrouter"}, strings.NewReader(""), &output, &errorOutput); code != 0 ||
+		!strings.Contains(output.String(), "is configured") {
+		t.Fatalf("status code = %d, output = %q, stderr = %q", code, output.String(), errorOutput.String())
+	}
+	output.Reset()
+	if code := authCommand(context.Background(), []string{"delete", "openrouter"}, strings.NewReader(""), &output, &errorOutput); code != 0 {
+		t.Fatalf("delete code = %d, stderr = %q", code, errorOutput.String())
+	}
+	if _, exists := store.values["openrouter"]; exists {
+		t.Fatal("credential was not deleted")
+	}
+}
+
+func TestAuthSetCanBeCancelled(t *testing.T) {
+	previous := credentialStore
+	store := &memoryCredentialStore{values: make(map[string]string)}
+	credentialStore = store
+	t.Cleanup(func() { credentialStore = previous })
+	input, writer := io.Pipe()
+	defer input.Close()
+	defer writer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if code := authCommand(ctx, []string{"set", "openrouter"}, input, io.Discard, io.Discard); code != 130 {
+		t.Fatalf("exit code = %d", code)
+	}
+	if len(store.values) != 0 {
+		t.Fatalf("stored credentials = %#v", store.values)
 	}
 }
 
@@ -160,4 +212,29 @@ func mustMkdir(t *testing.T, path string) {
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type memoryCredentialStore struct {
+	values map[string]string
+}
+
+func (s *memoryCredentialStore) Set(provider, secret string) error {
+	s.values[provider] = secret
+	return nil
+}
+
+func (s *memoryCredentialStore) Get(provider string) (string, error) {
+	secret, exists := s.values[provider]
+	if !exists {
+		return "", auth.ErrNotFound
+	}
+	return secret, nil
+}
+
+func (s *memoryCredentialStore) Delete(provider string) error {
+	if _, exists := s.values[provider]; !exists {
+		return auth.ErrNotFound
+	}
+	delete(s.values, provider)
+	return nil
 }

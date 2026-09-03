@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
+	"alo/internal/auth"
 	"alo/internal/config"
 	runpkg "alo/internal/run"
 )
@@ -151,6 +153,56 @@ func TestExerciseEnvironmentContainsOnlyConfiguredInputs(t *testing.T) {
 	}
 }
 
+func TestAgentEnvironmentUsesKeyringAndEnvironmentOverride(t *testing.T) {
+	const variable = "OPENROUTER_API_KEY"
+	previous, existed := os.LookupEnv(variable)
+	if err := os.Unsetenv(variable); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if existed {
+			_ = os.Setenv(variable, previous)
+		} else {
+			_ = os.Unsetenv(variable)
+		}
+	})
+	store := &testCredentialStore{secret: "stored-key"}
+	runtime := &PodmanAgent{Secrets: store}
+	configuration := &config.Config{Agent: config.AgentConfig{Provider: "openrouter"}}
+
+	values, err := runtime.agentEnvironment(configuration)
+	if err != nil || values[variable] != "stored-key" {
+		t.Fatalf("stored environment = %#v, %v", values, err)
+	}
+	if err := os.Setenv(variable, "exported-key"); err != nil {
+		t.Fatal(err)
+	}
+	configuration.Agent.PassEnv = []string{variable}
+	values, err = runtime.agentEnvironment(configuration)
+	if err != nil || values[variable] != "exported-key" {
+		t.Fatalf("exported environment = %#v, %v", values, err)
+	}
+	if store.reads != 1 {
+		t.Fatalf("keyring reads = %d", store.reads)
+	}
+}
+
+func TestAgentEnvironmentExplainsMissingCredential(t *testing.T) {
+	const variable = "OPENROUTER_API_KEY"
+	previous, existed := os.LookupEnv(variable)
+	_ = os.Unsetenv(variable)
+	t.Cleanup(func() {
+		if existed {
+			_ = os.Setenv(variable, previous)
+		}
+	})
+	runtime := &PodmanAgent{Secrets: &testCredentialStore{err: auth.ErrNotFound}}
+	_, err := runtime.agentEnvironment(&config.Config{Agent: config.AgentConfig{Provider: "openrouter"}})
+	if err == nil || !strings.Contains(err.Error(), "alo auth set openrouter") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func writeCandidateEntrypoint(t *testing.T, candidate, content string) {
 	t.Helper()
 	directory := filepath.Join(candidate, ".alo")
@@ -166,3 +218,18 @@ func mustMkdir(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+type testCredentialStore struct {
+	secret string
+	err    error
+	reads  int
+}
+
+func (s *testCredentialStore) Set(string, string) error { return nil }
+
+func (s *testCredentialStore) Get(string) (string, error) {
+	s.reads++
+	return s.secret, s.err
+}
+
+func (s *testCredentialStore) Delete(string) error { return nil }

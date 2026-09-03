@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"alo/internal/agent"
+	"alo/internal/auth"
 	"alo/internal/config"
 	runpkg "alo/internal/run"
 )
@@ -25,13 +26,14 @@ import (
 type PodmanAgent struct {
 	Binary  string
 	Console io.Writer
+	Secrets auth.Store
 
 	imageOverride   string
 	commandOverride []string
 }
 
 func New(console io.Writer) *PodmanAgent {
-	return &PodmanAgent{Binary: "podman", Console: console}
+	return &PodmanAgent{Binary: "podman", Console: console, Secrets: auth.KeyringStore{}}
 }
 
 func (p *PodmanAgent) ResolveImage(ctx context.Context) (string, error) {
@@ -208,10 +210,9 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn runpkg.AgentTurn) (runpkg.A
 	if turn.Config == nil || turn.Store == nil {
 		return runpkg.AgentResult{}, errors.New("Podman agent turn is incomplete")
 	}
-	for _, name := range turn.Config.Agent.PassEnv {
-		if _, exists := os.LookupEnv(name); !exists {
-			return runpkg.AgentResult{}, fmt.Errorf("agent environment variable %s is not set", name)
-		}
+	environment, err := p.agentEnvironment(turn.Config)
+	if err != nil {
+		return runpkg.AgentResult{}, err
 	}
 	name := workshopContainerName(turn.Store)
 	if err := p.ensureWorkshop(ctx, turn, name); err != nil {
@@ -226,7 +227,7 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn runpkg.AgentTurn) (runpkg.A
 		return runpkg.AgentResult{}, fmt.Errorf("write workshop request: %w", err)
 	}
 	environmentPath := filepath.Join(turn.Store.SessionDir, "agent-env.json")
-	if err := writeAgentEnvironment(environmentPath, turn.Config.Agent.PassEnv); err != nil {
+	if err := writeAgentEnvironment(environmentPath, environment); err != nil {
 		return runpkg.AgentResult{}, err
 	}
 	defer os.Remove(environmentPath)
@@ -244,8 +245,8 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn runpkg.AgentTurn) (runpkg.A
 	tail := &tailBuffer{maximum: 64 << 10}
 	target := io.MultiWriter(logFile, progress, tail)
 	var secrets []string
-	for _, variable := range turn.Config.Agent.PassEnv {
-		secrets = append(secrets, os.Getenv(variable))
+	for _, secret := range environment {
+		secrets = append(secrets, secret)
 	}
 	redacted := newSecretRedactor(target, secrets)
 	stdoutStream := newAgentStreamWriter(redacted, progress)
@@ -352,11 +353,7 @@ func (p *PodmanAgent) workshopCreateArguments(turn runpkg.AgentTurn, name string
 	return args, nil
 }
 
-func writeAgentEnvironment(path string, names []string) error {
-	values := make(map[string]string, len(names))
-	for _, name := range names {
-		values[name] = os.Getenv(name)
-	}
+func writeAgentEnvironment(path string, values map[string]string) error {
 	data, err := json.Marshal(values)
 	if err != nil {
 		return fmt.Errorf("encode agent environment: %w", err)
@@ -366,6 +363,37 @@ func writeAgentEnvironment(path string, names []string) error {
 		return fmt.Errorf("write agent environment: %w", err)
 	}
 	return nil
+}
+
+func (p *PodmanAgent) agentEnvironment(configuration *config.Config) (map[string]string, error) {
+	values := make(map[string]string, len(configuration.Agent.PassEnv)+1)
+	for _, name := range configuration.Agent.PassEnv {
+		if value, exists := os.LookupEnv(name); exists {
+			values[name] = value
+			continue
+		}
+		if configuration.Agent.Provider == "openrouter" && name == "OPENROUTER_API_KEY" {
+			continue
+		}
+		return nil, fmt.Errorf("agent environment variable %s is not set", name)
+	}
+	if configuration.Agent.Provider == "openrouter" {
+		if _, exists := values["OPENROUTER_API_KEY"]; !exists {
+			store := p.Secrets
+			if store == nil {
+				store = auth.KeyringStore{}
+			}
+			secret, err := store.Get("openrouter")
+			if errors.Is(err, auth.ErrNotFound) {
+				return nil, errors.New("OpenRouter credential is not configured; run `alo auth set openrouter`")
+			}
+			if err != nil {
+				return nil, err
+			}
+			values["OPENROUTER_API_KEY"] = secret
+		}
+	}
+	return values, nil
 }
 
 // The workshop controls its session directory. Stop it before calling this,

@@ -54,7 +54,11 @@ type initialConfig struct {
 }
 
 type initialAgentConfig struct {
-	PassEnv []string `yaml:"pass_env"`
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
+	Thinking string `yaml:"thinking"`
+	ZDR      bool   `yaml:"zdr"`
+	Timeout  string `yaml:"timeout"`
 }
 
 type initialCommandConfig struct {
@@ -95,9 +99,15 @@ func initCommand(ctx context.Context, args []string, input io.Reader, output, er
 		Name:      name,
 		Goal:      goal,
 		Candidate: "./" + filepath.ToSlash(candidate),
-		Agent:     initialAgentConfig{PassEnv: []string{"OPENROUTER_API_KEY"}},
-		Prepare:   initialCommandConfig{Command: []string{"./prepare"}},
-		Verify:    initialCommandConfig{Command: []string{"./verify"}},
+		Agent: initialAgentConfig{
+			Provider: "openrouter",
+			Model:    "openai/gpt-5.6-sol",
+			Thinking: "high",
+			ZDR:      true,
+			Timeout:  "15m",
+		},
+		Prepare: initialCommandConfig{Command: []string{"./prepare"}},
+		Verify:  initialCommandConfig{Command: []string{"./verify"}},
 	}
 	configData, err := yaml.Marshal(initial)
 	if err != nil {
@@ -155,7 +165,7 @@ func initCommand(ctx context.Context, args []string, input io.Reader, output, er
 		return 2
 	}
 	fmt.Fprintln(output, "Created alo.yaml, prepare, verify, and", candidate+string(filepath.Separator))
-	fmt.Fprintln(output, "Next: edit prepare and verify, then run `alo try prepare` and `alo try verify`.")
+	fmt.Fprintln(output, "Next: run `alo auth set openrouter`, edit the scripts, then use `alo try prepare` and `alo try verify`.")
 	return 0
 }
 

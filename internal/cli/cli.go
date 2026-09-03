@@ -26,6 +26,8 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "auth":
+		return authCommand(ctx, args[1:], stdin, stdout, stderr)
 	case "init":
 		return initCommand(ctx, args[1:], stdin, stdout, stderr)
 	case "validate":
@@ -176,6 +178,7 @@ func printUsage(output io.Writer) {
 	fmt.Fprintln(output, `Alo runs a trusted verifier and puts a containerized agent in its failure loop.
 
 Usage:
+  alo auth set|status|delete openrouter
   alo init
   alo validate [FILE]
   alo try prepare [FILE]
