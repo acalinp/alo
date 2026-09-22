@@ -3,21 +3,24 @@ name: pocketbeagle2-fastboot
 goal: Bring up fastboot on the connected PocketBeagle 2 and leave a reproducible solution in the candidate workspace.
 
 parameters:
-  serial: /dev/ttyACM0
+  # Use the board's debug UART, preferably a stable /dev/serial/by-id path.
+  # Do not use the serial port owned by the GPIO reset controller.
+  serial: /dev/serial/by-id/usb-Raspberry_Pi_Debug_Probe__CMSIS-DAP__E664A836A32BAC31-if01
 
 candidate: ./automation
 
 sandbox:
   devices:
     - /dev/bus/usb
-    - /dev/ttyACM0
 
 agent:
   provider: openrouter
   model: google/gemini-3.8-flash
-  thinking: medium
+  thinking: low
   zdr: true
-  timeout: 30m
+
+capture:
+  command: [./capture]
 
 prepare:
   command: [./prepare]
@@ -25,7 +28,7 @@ prepare:
   timeout: 30s
 
 exercise:
-  timeout: 30m
+  timeout: 3m
 
 verify:
   command: [./verify]

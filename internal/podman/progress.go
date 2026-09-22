@@ -139,7 +139,7 @@ func (p *terminalProgress) render(now time.Time) {
 	frame := progressFrames[p.frame%len(progressFrames)]
 	p.frame++
 	_, err := fmt.Fprintf(
-		p.output, "%s[%s] %s %s %s",
+		p.output, "%s[agent %s] %s %s %s",
 		clearLine,
 		p.runID,
 		p.description(),

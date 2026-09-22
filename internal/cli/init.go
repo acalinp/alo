@@ -18,13 +18,8 @@ import (
 const prepareTemplate = `#!/usr/bin/env bash
 set -Eeuo pipefail
 
-evidence=${ALO_EVIDENCE_DIR:?}
-
 # Reset or initialize the fixture here. Delete the prepare section from
 # alo.yaml if the fixture needs no setup.
-
-# Save observations that will help the agent diagnose failures. For example:
-# timeout 5s cat /dev/ttyACM0 >"$evidence/serial.log" 2>&1 || true
 `
 
 const verifyTemplate = `#!/usr/bin/env bash
@@ -54,11 +49,12 @@ type initialConfig struct {
 }
 
 type initialAgentConfig struct {
-	Provider string `yaml:"provider"`
-	Model    string `yaml:"model"`
-	Thinking string `yaml:"thinking"`
-	ZDR      bool   `yaml:"zdr"`
-	Timeout  string `yaml:"timeout"`
+	Provider         string `yaml:"provider"`
+	Model            string `yaml:"model"`
+	Thinking         string `yaml:"thinking"`
+	ZDR              bool   `yaml:"zdr"`
+	BootstrapTimeout string `yaml:"bootstrap_timeout"`
+	Timeout          string `yaml:"timeout"`
 }
 
 type initialCommandConfig struct {
@@ -100,11 +96,12 @@ func initCommand(ctx context.Context, args []string, input io.Reader, output, er
 		Goal:      goal,
 		Candidate: "./" + filepath.ToSlash(candidate),
 		Agent: initialAgentConfig{
-			Provider: "openrouter",
-			Model:    "google/gemini-3.8-flash",
-			Thinking: "high",
-			ZDR:      true,
-			Timeout:  "15m",
+			Provider:         "openrouter",
+			Model:            "google/gemini-3.8-flash",
+			Thinking:         "high",
+			ZDR:              true,
+			BootstrapTimeout: "30m",
+			Timeout:          "5m",
 		},
 		Prepare: initialCommandConfig{Command: []string{"./prepare"}},
 		Verify:  initialCommandConfig{Command: []string{"./verify"}},
@@ -165,7 +162,7 @@ func initCommand(ctx context.Context, args []string, input io.Reader, output, er
 		return 2
 	}
 	fmt.Fprintln(output, "Created alo.yaml, prepare, verify, and", candidate+string(filepath.Separator))
-	fmt.Fprintln(output, "Next: run `alo auth set openrouter`, edit the scripts, then use `alo try prepare` and `alo try verify`.")
+	fmt.Fprintln(output, "Next: configure the scripts, then use `alo try prepare` and `alo try verify`.")
 	return 0
 }
 

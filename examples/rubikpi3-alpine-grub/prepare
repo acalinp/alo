@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+serial=${ALO_PARAMETER_SERIAL:?}
+baud=${ALO_PARAMETER_BAUD:?}
+
+for command in adb lsusb stty timeout; do
+	command -v "$command" >/dev/null || {
+		echo "infrastructure failure: missing host command $command" >&2
+		exit 2
+	}
+done
+[[ -c "$serial" ]] || {
+	echo "infrastructure failure: serial device is unavailable: $serial" >&2
+	exit 2
+}
+
+stty -F "$serial" "$baud" raw -echo -ixon -ixoff
+
+echo "USB devices before reset:"
+lsusb 2>&1 || true
+echo
+echo "ADB devices before reset:"
+adb devices -l 2>&1 || true
+echo
+
+if ! ./tools/reset.sh; then
+	echo "infrastructure failure: board reset failed" >&2
+	exit 2
+fi
+
+adb_serial=${ALO_PARAMETER_ADB_SERIAL:-}
+adb_command=(adb)
+if [[ -n "$adb_serial" ]]; then
+	adb_command+=(-s "$adb_serial")
+fi
+
+echo "Waiting for the RUBIK Pi ADB device..."
+if ! timeout 90s "${adb_command[@]}" wait-for-device; then
+	echo "infrastructure failure: ADB did not return after the power cycle" >&2
+	exit 2
+fi
+if ! timeout 10s "${adb_command[@]}" shell true; then
+	echo "infrastructure failure: the ADB shell is not ready" >&2
+	exit 2
+fi
+
+echo "USB devices after reset:"
+lsusb 2>&1 || true
+echo
+echo "ADB device after reset:"
+"${adb_command[@]}" devices -l

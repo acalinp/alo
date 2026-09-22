@@ -21,6 +21,29 @@ type fakeRuntime struct {
 	turn      func(context.Context, AgentTurn) (AgentResult, error)
 }
 
+type cancellingRuntime struct {
+	fakeRuntime *fakeRuntime
+	cancel      context.CancelFunc
+}
+
+func (r *cancellingRuntime) ResolveImage(ctx context.Context) (string, error) {
+	return r.fakeRuntime.ResolveImage(ctx)
+}
+
+func (r *cancellingRuntime) Exercise(ctx context.Context, turn ExerciseTurn) (ExerciseResult, error) {
+	r.cancel()
+	<-ctx.Done()
+	return ExerciseResult{}, ctx.Err()
+}
+
+func (r *cancellingRuntime) Turn(ctx context.Context, turn AgentTurn) (AgentResult, error) {
+	return r.fakeRuntime.Turn(ctx, turn)
+}
+
+func (r *cancellingRuntime) RemoveWorkshop(ctx context.Context, store *RunStore) error {
+	return r.fakeRuntime.RemoveWorkshop(ctx, store)
+}
+
 func (r *fakeRuntime) ResolveImage(context.Context) (string, error) {
 	return "sha256:test-agent", nil
 }
@@ -157,6 +180,177 @@ printf serial-data > "$ALO_EVIDENCE_DIR/serial.log"
 	}
 }
 
+func TestCaptureSpansPrepareAndReplayAndStopsBeforeVerify(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	mustMkdir(t, candidate)
+	events := filepath.Join(root, "events")
+	capture := writeExecutable(t, root, "capture", `#!/bin/sh
+set -eu
+events=$1
+trap 'printf "stopped\n" >> "$events"; exit 0' TERM
+printf "started\n" >> "$events"
+printf . >&3
+exec 3>&-
+while :; do printf "captured\n"; sleep 0.01; done
+`)
+	prepare := writeExecutable(t, root, "prepare", `#!/bin/sh
+set -eu
+grep -q started "`+events+`"
+printf "prepared\n" >> "`+events+`"
+`)
+	writeCandidateEntrypoint(t, candidate, `#!/bin/sh
+set -eu
+grep -q started "`+events+`"
+printf "replayed\n" >> "`+events+`"
+`)
+	verifier := writeExecutable(t, root, "verify", `#!/bin/sh
+set -eu
+grep -q stopped "`+events+`"
+`)
+	configuration := testConfig(root, candidate, verifier)
+	configuration.Capture = &config.CaptureConfig{Command: []string{capture, events}}
+	configuration.Prepare = &config.CommandConfig{Command: []string{prepare}, Timeout: config.Duration(time.Minute)}
+	configuration.Attempts = 1
+
+	result, err := Start(context.Background(), configuration, RunOptions{
+		StateDir: filepath.Join(root, "state"),
+		Runtime:  &fakeRuntime{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 0 || result.State.Status != StatusSucceeded {
+		t.Fatalf("result = code %d, status %s", result.ExitCode, result.State.Status)
+	}
+	data, err := os.ReadFile(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "started\nprepared\nreplayed\nstopped\n"
+	if string(data) != want {
+		t.Fatalf("events = %q, want %q", data, want)
+	}
+	captureLog := filepath.Join(root, "state", "runs", result.ID, "attempts", "0001", "capture.log")
+	if info, err := os.Stat(captureLog); err != nil || info.Size() == 0 {
+		t.Fatalf("capture log = %#v, %v", info, err)
+	}
+}
+
+func TestCapturePrematureExitStopsRun(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	mustMkdir(t, candidate)
+	capture := writeExecutable(t, root, "capture", "#!/bin/sh\nprintf . >&3\nexec 3>&-\necho capture failed\nexit 7\n")
+	prepare := writeExecutable(t, root, "prepare", "#!/bin/sh\nsleep 10\n")
+	writeCandidateEntrypoint(t, candidate, "#!/bin/sh\nexit 0\n")
+	verifier := writeExecutable(t, root, "verify", "#!/bin/sh\nexit 0\n")
+	configuration := testConfig(root, candidate, verifier)
+	configuration.Capture = &config.CaptureConfig{Command: []string{capture}}
+	configuration.Prepare = &config.CommandConfig{Command: []string{prepare}, Timeout: config.Duration(time.Minute)}
+	runtime := &fakeRuntime{}
+
+	started := time.Now()
+	result, err := Start(context.Background(), configuration, RunOptions{
+		StateDir: filepath.Join(root, "state"),
+		Runtime:  runtime,
+	})
+	if err == nil || !strings.Contains(err.Error(), "capture command exited before replay completed with status 7") {
+		t.Fatalf("error = %v", err)
+	}
+	if result.ExitCode != 2 || runtime.exercises != 0 {
+		t.Fatalf("result code = %d, exercises = %d", result.ExitCode, runtime.exercises)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("capture failure took %s to cancel prepare", elapsed)
+	}
+}
+
+func TestCaptureRequiresReadinessSignal(t *testing.T) {
+	previous := captureReadyTimeout
+	captureReadyTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { captureReadyTimeout = previous })
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	mustMkdir(t, candidate)
+	capture := writeExecutable(t, root, "capture", "#!/bin/sh\nsleep 10\n")
+	verifier := writeExecutable(t, root, "verify", "#!/bin/sh\nexit 0\n")
+	configuration := testConfig(root, candidate, verifier)
+	configuration.Capture = &config.CaptureConfig{Command: []string{capture}}
+	store := NewRunStore(filepath.Join(root, "state"), "capture-ready")
+	if err := store.Create(); err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Now()
+	_, err := StartCapture(context.Background(), configuration, store, 1)
+	if err == nil || !strings.Contains(err.Error(), "did not become ready") {
+		t.Fatalf("error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("readiness timeout took %s", elapsed)
+	}
+}
+
+func TestCaptureEnvironmentIsRestricted(t *testing.T) {
+	configuration := &config.Config{
+		Candidate:  "/candidate",
+		Parameters: map[string]string{"serial": "/dev/example"},
+		References: map[string]string{"facts": "/facts"},
+	}
+	environment := strings.Join(captureEnvironment(configuration, "/evidence"), "\n")
+	for _, want := range []string{"ALO_EVIDENCE_DIR=/evidence", "ALO_PARAMETER_SERIAL=/dev/example"} {
+		if !strings.Contains(environment, want) {
+			t.Fatalf("capture environment does not contain %q: %q", want, environment)
+		}
+	}
+	for _, forbidden := range []string{"ALO_CANDIDATE=", "ALO_REFERENCE_", "ALO_RESULT="} {
+		if strings.Contains(environment, forbidden) {
+			t.Fatalf("capture environment contains %q: %q", forbidden, environment)
+		}
+	}
+}
+
+func TestResumeRewindsInterruptedReplayToPrepare(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "candidate")
+	mustMkdir(t, candidate)
+	prepareCount := filepath.Join(root, "prepare-count")
+	prepare := writeExecutable(t, root, "prepare", `#!/bin/sh
+printf prepared\n >> "`+prepareCount+`"
+`)
+	capture := writeExecutable(t, root, "capture", `#!/bin/sh
+printf . >&3
+exec 3>&-
+while :; do sleep 1; done
+`)
+	writeCandidateEntrypoint(t, candidate, "#!/bin/sh\nexit 0\n")
+	verifier := writeExecutable(t, root, "verify", "#!/bin/sh\nexit 0\n")
+	configuration := testConfig(root, candidate, verifier)
+	configuration.Capture = &config.CaptureConfig{Command: []string{capture}}
+	configuration.Prepare = &config.CommandConfig{Command: []string{prepare}, Timeout: config.Duration(time.Minute)}
+	ctx, cancel := context.WithCancel(context.Background())
+	firstRuntime := &fakeRuntime{}
+	cancelRuntime := &cancellingRuntime{fakeRuntime: firstRuntime, cancel: cancel}
+	first, err := Start(ctx, configuration, RunOptions{StateDir: filepath.Join(root, "state"), Runtime: cancelRuntime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ExitCode != 130 || first.State.Phase != PhaseExercise {
+		t.Fatalf("first = code %d, phase %s", first.ExitCode, first.State.Phase)
+	}
+	resumed, err := Resume(context.Background(), first.ID, RunOptions{
+		StateDir: filepath.Join(root, "state"), Runtime: &fakeRuntime{},
+	})
+	if err != nil || resumed.ExitCode != 0 {
+		t.Fatalf("resume = %#v, %v", resumed, err)
+	}
+	data, err := os.ReadFile(prepareCount)
+	if err != nil || strings.Count(string(data), "prepared") != 2 {
+		t.Fatalf("prepare count = %q, %v", data, err)
+	}
+}
+
 func TestRunTerminalOutcomes(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -211,11 +405,13 @@ func TestResumeInterruptedAgentTurn(t *testing.T) {
 	verifier := writeExecutable(t, root, "verify", `#!/bin/sh
 test -f "$ALO_CANDIDATE/complete" || exit 1
 `)
-	config := testConfig(root, candidate, verifier)
-	config.Agent.Provider = "anthropic"
-	config.Agent.Model = "claude-sonnet-4-5"
-	config.Agent.Thinking = "medium"
-	config.Agent.PassEnv = []string{"ANTHROPIC_API_KEY"}
+	configuration := testConfig(root, candidate, verifier)
+	configuration.Agent.Provider = "anthropic"
+	configuration.Agent.Model = "claude-sonnet-4-5"
+	configuration.Agent.Thinking = "medium"
+	configuration.Agent.PassEnv = []string{"ANTHROPIC_API_KEY"}
+	configuration.Agent.BootstrapTimeout = config.Duration(45 * time.Minute)
+	configuration.Agent.Timeout = config.Duration(5 * time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
 	firstRuntime := &fakeRuntime{turn: func(ctx context.Context, turn AgentTurn) (AgentResult, error) {
 		if err := os.WriteFile(filepath.Join(turn.Config.Candidate, "partial"), []byte("partial"), 0o644); err != nil {
@@ -225,7 +421,7 @@ test -f "$ALO_CANDIDATE/complete" || exit 1
 		<-ctx.Done()
 		return AgentResult{}, ctx.Err()
 	}}
-	first, err := Start(ctx, config, RunOptions{
+	first, err := Start(ctx, configuration, RunOptions{
 		StateDir: filepath.Join(root, "state"),
 		Runtime:  firstRuntime,
 	})
@@ -239,7 +435,8 @@ test -f "$ALO_CANDIDATE/complete" || exit 1
 		if turn.Config.Agent.Provider != "anthropic" ||
 			turn.Config.Agent.Model != "claude-sonnet-4-5" ||
 			turn.Config.Agent.Thinking != "medium" ||
-			len(turn.Config.Agent.PassEnv) != 1 || turn.Config.Agent.PassEnv[0] != "ANTHROPIC_API_KEY" {
+			len(turn.Config.Agent.PassEnv) != 1 || turn.Config.Agent.PassEnv[0] != "ANTHROPIC_API_KEY" ||
+			agentTimeout(turn.Config, turn.Attempt) != 45*time.Minute {
 			t.Fatalf("resumed agent config = %#v", turn.Config.Agent)
 		}
 		if _, err := os.Stat(filepath.Join(turn.Config.Candidate, "partial")); err != nil {
@@ -259,21 +456,58 @@ test -f "$ALO_CANDIDATE/complete" || exit 1
 	}
 }
 
+func TestAgentTimeoutUsesBootstrapBudgetOnlyForFirstAttempt(t *testing.T) {
+	configuration := &config.Config{Agent: config.AgentConfig{
+		BootstrapTimeout: config.Duration(30 * time.Minute),
+		Timeout:          config.Duration(5 * time.Minute),
+	}}
+	if got := agentTimeout(configuration, 1); got != 30*time.Minute {
+		t.Fatalf("bootstrap timeout = %s", got)
+	}
+	if got := agentTimeout(configuration, 2); got != 5*time.Minute {
+		t.Fatalf("repair timeout = %s", got)
+	}
+}
+
+func TestAgentBootstrapTimeoutDefaultsToRepairTimeout(t *testing.T) {
+	configuration := &config.Config{Agent: config.AgentConfig{Timeout: config.Duration(7 * time.Minute)}}
+	configuration.SetDefaults()
+	if configuration.Agent.BootstrapTimeout != configuration.Agent.Timeout {
+		t.Fatalf("bootstrap = %s, timeout = %s", time.Duration(configuration.Agent.BootstrapTimeout), time.Duration(configuration.Agent.Timeout))
+	}
+}
+
+func TestAgentTimeoutsAreUnlimitedWhenOmitted(t *testing.T) {
+	configuration := &config.Config{}
+	configuration.SetDefaults()
+	if got := agentTimeout(configuration, 1); got != 0 {
+		t.Fatalf("bootstrap timeout = %s", got)
+	}
+	if got := agentTimeout(configuration, 2); got != 0 {
+		t.Fatalf("repair timeout = %s", got)
+	}
+	ctx, cancel := agentContext(context.Background(), 0)
+	defer cancel()
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		t.Fatal("unlimited agent context has a deadline")
+	}
+}
+
 func TestConfigRejectsUnsafeLayouts(t *testing.T) {
 	root := t.TempDir()
 	candidate := filepath.Join(root, "candidate")
 	mustMkdir(t, candidate)
 	verifier := writeExecutable(t, candidate, "verify", "#!/bin/sh\nexit 0\n")
-	config := testConfig(root, candidate, verifier)
-	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "inside candidate") {
+	configuration := testConfig(root, candidate, verifier)
+	if err := configuration.Validate(); err == nil || !strings.Contains(err.Error(), "inside candidate") {
 		t.Fatalf("unsafe verifier error = %v", err)
 	}
 
 	outsideVerifier := writeExecutable(t, root, "safe-verify", "#!/bin/sh\nexit 0\n")
-	config = testConfig(root, candidate, outsideVerifier)
-	config.References["nested"] = filepath.Join(candidate, "reference")
-	mustMkdir(t, config.References["nested"])
-	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "overlaps") {
+	configuration = testConfig(root, candidate, outsideVerifier)
+	configuration.References["nested"] = filepath.Join(candidate, "reference")
+	mustMkdir(t, configuration.References["nested"])
+	if err := configuration.Validate(); err == nil || !strings.Contains(err.Error(), "overlaps") {
 		t.Fatalf("overlap error = %v", err)
 	}
 
@@ -281,15 +515,22 @@ func TestConfigRejectsUnsafeLayouts(t *testing.T) {
 	if err := os.Symlink(root, linkedCandidate); err != nil {
 		t.Fatal(err)
 	}
-	config = testConfig(root, linkedCandidate, outsideVerifier)
-	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "inside candidate") {
+	configuration = testConfig(root, linkedCandidate, outsideVerifier)
+	if err := configuration.Validate(); err == nil || !strings.Contains(err.Error(), "inside candidate") {
 		t.Fatalf("symlinked candidate error = %v", err)
 	}
 
-	config = testConfig(root, candidate, outsideVerifier)
-	config.Sandbox.Devices = []string{root}
-	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "beneath /dev") {
+	configuration = testConfig(root, candidate, outsideVerifier)
+	configuration.Sandbox.Devices = []string{root}
+	if err := configuration.Validate(); err == nil || !strings.Contains(err.Error(), "beneath /dev") {
 		t.Fatalf("unsafe device error = %v", err)
+	}
+
+	capture := writeExecutable(t, candidate, "capture", "#!/bin/sh\nexit 0\n")
+	configuration = testConfig(root, candidate, outsideVerifier)
+	configuration.Capture = &config.CaptureConfig{Command: []string{capture}}
+	if err := configuration.Validate(); err == nil || !strings.Contains(err.Error(), "capture executable is inside candidate") {
+		t.Fatalf("unsafe capture error = %v", err)
 	}
 }
 

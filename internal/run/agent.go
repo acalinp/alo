@@ -13,19 +13,29 @@ import (
 const AgentBlockedPrefix = "ALO_BLOCKED:"
 
 type AgentRequest struct {
-	Goal       string            `json:"goal"`
-	Attempt    int               `json:"attempt"`
-	Provider   string            `json:"provider"`
-	Model      string            `json:"model"`
-	Thinking   string            `json:"thinking"`
-	ZDR        bool              `json:"zdr,omitempty"`
-	Parameters map[string]string `json:"parameters,omitempty"`
-	Candidate  string            `json:"candidate"`
-	References map[string]string `json:"references,omitempty"`
-	Devices    []string          `json:"devices,omitempty"`
-	Evidence   string            `json:"evidence"`
-	Cache      string            `json:"cache"`
-	Session    string            `json:"session"`
+	Goal          string            `json:"goal"`
+	Attempt       int               `json:"attempt"`
+	Provider      string            `json:"provider"`
+	Model         string            `json:"model"`
+	Thinking      string            `json:"thinking"`
+	ZDR           bool              `json:"zdr,omitempty"`
+	Parameters    map[string]string `json:"parameters,omitempty"`
+	Candidate     string            `json:"candidate"`
+	References    map[string]string `json:"references,omitempty"`
+	Devices       []string          `json:"devices,omitempty"`
+	Evidence      string            `json:"evidence"`
+	EvidenceFiles []EvidenceSummary `json:"evidence_files,omitempty"`
+	ReplayExit    int               `json:"replay_exit"`
+	Failure       string            `json:"failure"`
+	Cache         string            `json:"cache"`
+	Session       string            `json:"session"`
+}
+
+type EvidenceSummary struct {
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`
+	Tail    string `json:"tail,omitempty"`
+	Omitted int64  `json:"omitted,omitempty"`
 }
 
 type AgentTurn struct {
@@ -36,6 +46,8 @@ type AgentTurn struct {
 	LogPath     string
 	RequestPath string
 	Console     io.Writer
+	ReplayExit  int
+	Failure     string
 }
 
 type AgentResult struct {

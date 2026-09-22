@@ -8,10 +8,11 @@
 
 ## Execution Boundaries
 
-- Preserve the loop in `internal/run/run.go`: trusted prepare, fresh candidate replay, trusted verify, then repair only after rejection. Success requires both replay exit 0 and verifier exit 0.
+- Preserve the loop in `internal/run/run.go`: trusted capture starts, trusted prepare, fresh candidate replay, capture stops, trusted verify, then repair only after rejection. Success requires both replay exit 0 and verifier exit 0.
 - `.alo/run` is the candidate's executable replay contract. It runs in a fresh credential-free container; only the candidate is writable, references are read-only under `/refs/<name>`, and configured parameters/references arrive as `ALO_PARAMETER_*`/`ALO_REFERENCE_*`.
 - The repair workshop persists across turns (`candidate`, run-scoped `cache`, `session`, and container root), while replay does not. Do not let workshop-only state satisfy verification.
-- `prepare` and `verify` are trusted host executables and must remain outside the candidate. Verifier exit 1 means candidate rejection; any other nonzero exit or timeout is infrastructure failure.
+- `capture`, `prepare`, and `verify` are trusted host executables and must remain outside the candidate. Verifier exit 1 means candidate rejection; any other nonzero exit or timeout is infrastructure failure.
+- Keep `capture` a single diagnostics-only foreground process with Alo-owned readiness and lifetime; do not add named captures, phase selection, restart policies, or dependencies.
 - Keep Alo an iteration coordinator, not a workflow engine: do not add action DAGs, watcher plugins, user-selected task images, or model/file-count declarations of success.
 
 ## Change Hotspots

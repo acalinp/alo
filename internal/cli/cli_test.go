@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"alo/internal/auth"
 	"alo/internal/config"
@@ -32,7 +33,8 @@ func TestInitCommandCreatesValidStarterFiles(t *testing.T) {
 		t.Fatalf("generated config = %#v", loaded)
 	}
 	if loaded.Agent.Provider != "openrouter" || loaded.Agent.Model != "google/gemini-3.8-flash" ||
-		loaded.Agent.Thinking != "high" || !loaded.Agent.ZDR || len(loaded.Agent.PassEnv) != 0 {
+		loaded.Agent.Thinking != "high" || !loaded.Agent.ZDR || len(loaded.Agent.PassEnv) != 0 ||
+		time.Duration(loaded.Agent.BootstrapTimeout) != 30*time.Minute || time.Duration(loaded.Agent.Timeout) != 5*time.Minute {
 		t.Fatalf("generated agent config = %#v", loaded.Agent)
 	}
 	for _, name := range []string{"prepare", "verify"} {
@@ -54,9 +56,15 @@ func TestInitCommandCreatesValidStarterFiles(t *testing.T) {
 
 func TestAuthCommandsManageCredentialWithoutPrintingIt(t *testing.T) {
 	previous := credentialStore
+	previousFile := fileCredentialStore
 	store := &memoryCredentialStore{values: make(map[string]string)}
 	credentialStore = store
-	t.Cleanup(func() { credentialStore = previous })
+	fileStore := &memoryCredentialStore{values: make(map[string]string)}
+	fileCredentialStore = fileStore
+	t.Cleanup(func() {
+		credentialStore = previous
+		fileCredentialStore = previousFile
+	})
 	var output bytes.Buffer
 	var errorOutput bytes.Buffer
 
@@ -77,6 +85,13 @@ func TestAuthCommandsManageCredentialWithoutPrintingIt(t *testing.T) {
 	}
 	if _, exists := store.values["openrouter"]; exists {
 		t.Fatal("credential was not deleted")
+	}
+	output.Reset()
+	if code := authCommand(context.Background(), []string{"set", "openrouter", "--file"}, strings.NewReader("file-key\n"), &output, &errorOutput); code != 0 {
+		t.Fatalf("file set code = %d, stderr = %q", code, errorOutput.String())
+	}
+	if fileStore.values["openrouter"] != "file-key" || !strings.Contains(output.String(), "credential file") {
+		t.Fatalf("file stored = %q, output = %q", fileStore.values["openrouter"], output.String())
 	}
 }
 
@@ -178,7 +193,7 @@ verify:
 		t.Fatalf("verify code = %d, stderr = %q", code, errorOutput.String())
 	}
 	if !strings.Contains(verifyOutput.String(), "verify rejected the candidate (exit 1)") ||
-		!strings.Contains(verifyOutput.String(), "output:\n  result was not ready") ||
+		!strings.Contains(verifyOutput.String(), "verify output:\n  result was not ready") ||
 		!strings.Contains(verifyOutput.String(), "verify.log\t21 bytes") {
 		t.Fatalf("verify output = %q", verifyOutput.String())
 	}
@@ -193,7 +208,7 @@ verify:
 	if code := tryCommand(context.Background(), []string{"prepare", configPath}, &failedOutput, &errorOutput); code != 2 {
 		t.Fatalf("failed prepare code = %d", code)
 	}
-	if !strings.Contains(failedOutput.String(), "prepare failed: prepare exited with status 2\n\noutput:\n  serial device is unavailable") ||
+	if !strings.Contains(failedOutput.String(), "prepare failed: prepare exited with status 2\n\nprepare output:\n  serial device is unavailable") ||
 		!strings.Contains(failedOutput.String(), "prepare.log\t29 bytes") {
 		t.Fatalf("failed prepare output = %q", failedOutput.String())
 	}

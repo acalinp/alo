@@ -132,9 +132,72 @@ func TestAgentRequestRetainsZDR(t *testing.T) {
 		References: map[string]string{},
 		Agent:      config.AgentConfig{ZDR: true},
 	}
-	request := agentRequest(configuration, runpkg.NewRunStore(t.TempDir(), "zdr-test"), 1)
+	store := runpkg.NewRunStore(t.TempDir(), "zdr-test")
+	if err := store.Create(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureAttempt(1); err != nil {
+		t.Fatal(err)
+	}
+	request, err := agentRequest(runpkg.AgentTurn{Config: configuration, Store: store, Attempt: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !request.ZDR {
 		t.Fatal("agent request did not retain ZDR enforcement")
+	}
+}
+
+func TestAgentRequestIncludesBoundedFailureEvidence(t *testing.T) {
+	root := t.TempDir()
+	store := runpkg.NewRunStore(root, "evidence-test")
+	if err := store.Create(); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.EnsureAttempt(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	large := strings.Repeat("x", maximumEvidenceTail+100)
+	if err := os.WriteFile(filepath.Join(attempt, "exercise.log"), []byte(large), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attempt, "verify.log"), []byte("verification failed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration := &config.Config{
+		Goal:       "repair it",
+		Parameters: map[string]string{},
+		References: map[string]string{},
+	}
+	request, err := agentRequest(runpkg.AgentTurn{
+		Config: configuration, Store: store, Attempt: 2,
+		ReplayExit: 7, Failure: "candidate entrypoint exited with status 7",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.ReplayExit != 7 || request.Failure != "candidate entrypoint exited with status 7" {
+		t.Fatalf("request failure metadata = %#v", request)
+	}
+	if len(request.EvidenceFiles) != 2 {
+		t.Fatalf("evidence = %#v", request.EvidenceFiles)
+	}
+	var exercise, verify *runpkg.EvidenceSummary
+	for index := range request.EvidenceFiles {
+		summary := &request.EvidenceFiles[index]
+		switch summary.Name {
+		case "exercise.log":
+			exercise = summary
+		case "verify.log":
+			verify = summary
+		}
+	}
+	if exercise == nil || len(exercise.Tail) != maximumEvidenceTail || exercise.Omitted != 100 {
+		t.Fatalf("exercise summary = %#v", exercise)
+	}
+	if verify == nil || verify.Tail != "verification failed\n" || verify.Omitted != 0 {
+		t.Fatalf("verify summary = %#v", verify)
 	}
 }
 

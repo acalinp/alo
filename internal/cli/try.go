@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,22 +57,48 @@ func tryCommand(ctx context.Context, args []string, output, errorOutput io.Write
 }
 
 func tryPrepare(ctx context.Context, config *config.Config, store *runpkg.RunStore, output io.Writer) int {
-	if config.Prepare == nil {
+	if config.Prepare == nil && config.Capture == nil {
 		fmt.Fprintln(output, "prepare is not configured")
 		return 0
 	}
-	logPath, err := runpkg.RunPrepare(ctx, config, store, 1)
+	capture, err := runpkg.StartCapture(ctx, config, store, 1)
+	if err != nil {
+		fmt.Fprintln(output, "capture failed:", err)
+		return 2
+	}
+	capturePath := ""
+	if capture != nil {
+		capturePath = capture.LogPath
+	}
+	logPath := ""
+	err = runpkg.MonitorCapture(ctx, capture, func(phaseContext context.Context) error {
+		if config.Prepare == nil {
+			return nil
+		}
+		var runErr error
+		logPath, runErr = runpkg.RunPrepare(phaseContext, config, store, 1)
+		return runErr
+	})
+	if capture != nil {
+		err = errors.Join(err, capture.Stop())
+	}
 	if err == nil {
-		fmt.Fprintln(output, "prepare succeeded")
+		if config.Prepare == nil {
+			fmt.Fprintln(output, "capture started and stopped successfully; prepare is not configured")
+		} else {
+			fmt.Fprintln(output, "prepare succeeded")
+		}
 		return 0
 	}
 	if ctx.Err() != nil {
 		fmt.Fprintln(output, "prepare stopped:", ctx.Err())
-		printTrialOutput(output, logPath)
+		printTrialOutput(output, "prepare output", logPath)
+		printTrialOutput(output, "capture output", capturePath)
 		return 130
 	}
 	fmt.Fprintln(output, "prepare failed:", err)
-	printTrialOutput(output, logPath)
+	printTrialOutput(output, "prepare output", logPath)
+	printTrialOutput(output, "capture output", capturePath)
 	return 2
 }
 
@@ -80,11 +107,11 @@ func tryVerify(ctx context.Context, config *config.Config, store *runpkg.RunStor
 	if err != nil {
 		if ctx.Err() != nil {
 			fmt.Fprintln(output, "verify stopped:", ctx.Err())
-			printTrialOutput(output, result.LogPath)
+			printTrialOutput(output, "verify output", result.LogPath)
 			return 130
 		}
 		fmt.Fprintln(output, "verify failed:", err)
-		printTrialOutput(output, result.LogPath)
+		printTrialOutput(output, "verify output", result.LogPath)
 		return 2
 	}
 	switch result.Outcome {
@@ -96,16 +123,16 @@ func tryVerify(ctx context.Context, config *config.Config, store *runpkg.RunStor
 		return 0
 	case runpkg.VerifyCandidateFailure:
 		fmt.Fprintln(output, "verify rejected the candidate (exit 1)")
-		printTrialOutput(output, result.LogPath)
+		printTrialOutput(output, "verify output", result.LogPath)
 		return 1
 	default:
 		fmt.Fprintln(output, "verify failed (infrastructure):", result.Failure)
-		printTrialOutput(output, result.LogPath)
+		printTrialOutput(output, "verify output", result.LogPath)
 		return 2
 	}
 }
 
-func printTrialOutput(output io.Writer, path string) {
+func printTrialOutput(output io.Writer, label, path string) {
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
 		return
@@ -118,9 +145,9 @@ func printTrialOutput(output io.Writer, path string) {
 	}
 	fmt.Fprintln(output)
 	if omitted > 0 {
-		fmt.Fprintf(output, "output (last 16 KiB; %d bytes omitted):\n", omitted)
+		fmt.Fprintf(output, "%s (last 16 KiB; %d bytes omitted):\n", label, omitted)
 	} else {
-		fmt.Fprintln(output, "output:")
+		fmt.Fprintf(output, "%s:\n", label)
 	}
 	text := strings.TrimSuffix(string(data), "\n")
 	fmt.Fprintln(output, "  "+strings.ReplaceAll(text, "\n", "\n  "))

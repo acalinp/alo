@@ -26,10 +26,11 @@ function diagnostic(text) {
 }
 
 function configurePi(request) {
-  if (!request.zdr) return;
-  if (request.provider !== "openrouter") {
-    throw new Error("zdr requires the openrouter provider");
-  }
+	if (request.zdr && request.provider !== "openrouter") {
+		throw new Error("zdr requires the openrouter provider");
+	}
+	if (request.provider !== "openrouter") return;
+	if (!request.zdr && request.model !== "google/gemini-3.8-flash") return;
   const directory = process.env.PI_CODING_AGENT_DIR;
   if (!directory) {
     throw new Error("PI_CODING_AGENT_DIR is not set");
@@ -37,17 +38,34 @@ function configurePi(request) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const path = `${directory}/models.json`;
   const temporary = `${path}.${process.pid}.tmp`;
-  const config = {
-    providers: {
-      openrouter: {
-        compat: {
-          openRouterRouting: {
-            zdr: true,
-          },
-        },
-      },
-    },
-  };
+	const openrouter = {};
+	if (request.zdr) {
+		openrouter.compat = { openRouterRouting: { zdr: true } };
+	}
+	if (request.provider === "openrouter" && request.model === "google/gemini-3.8-flash") {
+		openrouter.models = [{
+			id: "google/gemini-3.8-flash",
+			name: "Google: Gemini 3.8 Flash",
+			api: "openai-completions",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: "low",
+				medium: "medium",
+				high: "high",
+				xhigh: null,
+				max: null,
+			},
+			input: ["text", "image"],
+			cost: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.041667 },
+			contextWindow: 1048576,
+			maxTokens: 65536,
+			compat: { supportsDeveloperRole: false, thinkingFormat: "openrouter" },
+		}];
+	}
+	const config = { providers: { openrouter } };
   try {
     fs.writeFileSync(temporary, `${JSON.stringify(config, null, 2)}\n`, {
       flag: "wx",
@@ -64,13 +82,28 @@ function configurePi(request) {
 }
 
 function promptFor(request) {
-  const lines = [
-    `Goal: ${request.goal}`,
-    `Attempt: ${request.attempt}`,
-    `Current evidence: ${request.evidence}`,
+	const lines = [
+		`Goal: ${request.goal}`,
+		`Attempt: ${request.attempt}`,
+		`Replay exit status: ${request.replay_exit}`,
+		`Current failure: ${request.failure}`,
+		`Current evidence: ${request.evidence}`,
     `Persistent build cache: ${request.cache}`,
     `Candidate workspace: ${request.candidate}`,
-  ];
+	];
+	if ((request.evidence_files || []).length) {
+		lines.push("Evidence summary:");
+		for (const file of request.evidence_files) {
+			const omitted = file.omitted ? `; first ${file.omitted} bytes omitted` : "";
+			lines.push(`- ${file.name}: ${file.size} bytes${omitted}`);
+			if (file.tail) {
+				lines.push("  Tail:");
+				for (const line of file.tail.replace(/\n$/, "").split("\n")) {
+					lines.push(`    ${line}`);
+				}
+			}
+		}
+	}
   if (Object.keys(request.references || {}).length) {
     lines.push("Read-only references:");
     for (const [name, path] of Object.entries(request.references)) {
@@ -140,12 +173,15 @@ try {
 }
 
 const args = [
-  "--provider", request.provider,
-  "--model", request.model,
-  "--thinking", request.thinking,
-  "--session-id", "alo",
-  "--session-dir", "/session",
-  "--no-context-files",
+	"--provider", request.provider,
+	"--model", request.model,
+	"--thinking", request.thinking,
+	"--session", "/session/alo.jsonl",
+	"--no-extensions",
+	"--no-skills",
+	"--no-prompt-templates",
+	"--no-themes",
+	"--no-context-files",
   "--no-approve",
   "--append-system-prompt", "/usr/local/share/alo-agent-instructions.md",
   "--mode", "json",
@@ -155,7 +191,7 @@ const args = [
 
 status("starting");
 const child = spawn("pi", args, {
-  env: { ...process.env, ...suppliedEnvironment },
+	env: { ...process.env, ...suppliedEnvironment, PI_SKIP_VERSION_CHECK: "1" },
   stdio: ["ignore", "pipe", "pipe"],
 });
 

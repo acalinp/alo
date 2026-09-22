@@ -33,7 +33,7 @@ type PodmanAgent struct {
 }
 
 func New(console io.Writer) *PodmanAgent {
-	return &PodmanAgent{Binary: "podman", Console: console, Secrets: auth.KeyringStore{}}
+	return &PodmanAgent{Binary: "podman", Console: console, Secrets: auth.DefaultStore{}}
 }
 
 func (p *PodmanAgent) ResolveImage(ctx context.Context) (string, error) {
@@ -158,7 +158,8 @@ func (p *PodmanAgent) Exercise(ctx context.Context, turn runpkg.ExerciseTurn) (r
 		return runpkg.ExerciseResult{}, fmt.Errorf("create exercise log: %w", err)
 	}
 	defer logFile.Close()
-	target := io.MultiWriter(logFile, writerOrDiscard(turn.Console))
+	console := newLinePrefixWriter(writerOrDiscard(turn.Console), "[replay] ")
+	target := io.MultiWriter(logFile, console)
 
 	cidPath := filepath.Join(filepath.Dir(turn.LogPath), "exercise.cid")
 	name := exerciseContainerName(turn.Store, turn.Attempt)
@@ -170,7 +171,7 @@ func (p *PodmanAgent) Exercise(ctx context.Context, turn runpkg.ExerciseTurn) (r
 		return runpkg.ExerciseResult{}, err
 	}
 	exitCode, runErr := p.runEphemeral(ctx, args, cidPath, name, target)
-	return runpkg.ExerciseResult{ExitCode: exitCode}, runErr
+	return runpkg.ExerciseResult{ExitCode: exitCode}, errors.Join(runErr, console.EndLine())
 }
 
 func (p *PodmanAgent) exerciseArguments(turn runpkg.ExerciseTurn, cidPath, name string) ([]string, error) {
@@ -218,7 +219,10 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn runpkg.AgentTurn) (runpkg.A
 	if err := p.ensureWorkshop(ctx, turn, name); err != nil {
 		return runpkg.AgentResult{}, err
 	}
-	request := agentRequest(turn.Config, turn.Store, turn.Attempt)
+	request, err := agentRequest(turn)
+	if err != nil {
+		return runpkg.AgentResult{}, err
+	}
 	if err := runpkg.WriteAgentRequest(turn.RequestPath, request); err != nil {
 		return runpkg.AgentResult{}, fmt.Errorf("write retained agent request: %w", err)
 	}
@@ -243,7 +247,7 @@ func (p *PodmanAgent) Turn(ctx context.Context, turn runpkg.AgentTurn) (runpkg.A
 	deadline, _ := ctx.Deadline()
 	progress := newTerminalProgress(console, turn.Store.ID, deadline)
 	tail := &tailBuffer{maximum: 64 << 10}
-	target := io.MultiWriter(logFile, progress, tail)
+	target := io.MultiWriter(logFile, newLinePrefixWriter(progress, "[agent] "), tail)
 	var secrets []string
 	for _, secret := range environment {
 		secrets = append(secrets, secret)
@@ -381,7 +385,7 @@ func (p *PodmanAgent) agentEnvironment(configuration *config.Config) (map[string
 		if _, exists := values["OPENROUTER_API_KEY"]; !exists {
 			store := p.Secrets
 			if store == nil {
-				store = auth.KeyringStore{}
+				store = auth.DefaultStore{}
 			}
 			secret, err := store.Get("openrouter")
 			if errors.Is(err, auth.ErrNotFound) {
@@ -529,26 +533,94 @@ func podmanMount(source, target string, readOnly bool) string {
 	return "type=bind,src=" + source + ",target=" + target + "," + mode
 }
 
-func agentRequest(config *config.Config, store *runpkg.RunStore, attempt int) runpkg.AgentRequest {
-	references := make(map[string]string, len(config.References))
-	for name := range config.References {
+func agentRequest(turn runpkg.AgentTurn) (runpkg.AgentRequest, error) {
+	configuration := turn.Config
+	references := make(map[string]string, len(configuration.References))
+	for name := range configuration.References {
 		references[name] = "/refs/" + name
 	}
-	return runpkg.AgentRequest{
-		Goal:       config.Goal,
-		Attempt:    attempt,
-		Provider:   config.Agent.Provider,
-		Model:      config.Agent.Model,
-		Thinking:   config.Agent.Thinking,
-		ZDR:        config.Agent.ZDR,
-		Parameters: config.Parameters,
-		Candidate:  "/work/candidate",
-		References: references,
-		Devices:    append([]string(nil), config.Sandbox.Devices...),
-		Evidence:   "/evidence/" + filepath.Base(store.AttemptDir(attempt)),
-		Cache:      "/cache",
-		Session:    "/session",
+	evidence, err := summarizeEvidence(turn.Store.AttemptDir(turn.Attempt))
+	if err != nil {
+		return runpkg.AgentRequest{}, err
 	}
+	return runpkg.AgentRequest{
+		Goal:          configuration.Goal,
+		Attempt:       turn.Attempt,
+		Provider:      configuration.Agent.Provider,
+		Model:         configuration.Agent.Model,
+		Thinking:      configuration.Agent.Thinking,
+		ZDR:           configuration.Agent.ZDR,
+		Parameters:    configuration.Parameters,
+		Candidate:     "/work/candidate",
+		References:    references,
+		Devices:       append([]string(nil), configuration.Sandbox.Devices...),
+		Evidence:      "/evidence/" + filepath.Base(turn.Store.AttemptDir(turn.Attempt)),
+		EvidenceFiles: evidence,
+		ReplayExit:    turn.ReplayExit,
+		Failure:       turn.Failure,
+		Cache:         "/cache",
+		Session:       "/session",
+	}, nil
+}
+
+const (
+	maximumEvidenceTail   = 4 << 10
+	maximumEvidencePacket = 16 << 10
+)
+
+func summarizeEvidence(directory string) ([]runpkg.EvidenceSummary, error) {
+	files, err := runpkg.EvidenceFiles(directory)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]runpkg.EvidenceSummary, len(files))
+	indexes := make([]int, len(files))
+	for index, file := range files {
+		result[index] = runpkg.EvidenceSummary{Name: file.Name, Size: file.Size}
+		indexes[index] = index
+	}
+	sort.SliceStable(indexes, func(first, second int) bool {
+		return evidencePriority(files[indexes[first]].Name) < evidencePriority(files[indexes[second]].Name)
+	})
+	remaining := int64(maximumEvidencePacket)
+	for _, index := range indexes {
+		file := files[index]
+		if remaining == 0 || (!strings.HasSuffix(file.Name, ".log") && !strings.HasSuffix(file.Name, ".json")) {
+			continue
+		}
+		limit := min(int64(maximumEvidenceTail), remaining)
+		tail, omitted, err := readFileTail(filepath.Join(directory, file.Name), file.Size, limit)
+		if err != nil {
+			return nil, fmt.Errorf("summarize evidence %q: %w", file.Name, err)
+		}
+		result[index].Tail = strings.ToValidUTF8(string(tail), "[invalid UTF-8]")
+		result[index].Omitted = omitted
+		remaining -= int64(len(tail))
+	}
+	return result, nil
+}
+
+func evidencePriority(name string) int {
+	for priority, prefix := range []string{"verify", "exercise", "capture", "prepare"} {
+		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".log") {
+			return priority
+		}
+	}
+	return 4
+}
+
+func readFileTail(path string, size, limit int64) ([]byte, int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer file.Close()
+	start := max(int64(0), size-limit)
+	if _, err := file.Seek(start, io.SeekStart); err != nil {
+		return nil, 0, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit))
+	return data, start, err
 }
 
 func parseBlockedReason(output string) string {

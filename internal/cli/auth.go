@@ -15,12 +15,19 @@ import (
 	"golang.org/x/term"
 )
 
-var credentialStore auth.Store = auth.KeyringStore{}
+var credentialStore auth.Store = auth.DefaultStore{}
+var fileCredentialStore auth.Store = auth.FileStore{}
 
 func authCommand(ctx context.Context, args []string, input io.Reader, output, errorOutput io.Writer) int {
-	if len(args) != 2 || args[1] != "openrouter" {
-		fmt.Fprintln(errorOutput, "usage: alo auth set|status|delete openrouter")
+	if len(args) < 2 || len(args) > 3 || args[1] != "openrouter" || (len(args) == 3 && args[2] != "--file") {
+		fmt.Fprintln(errorOutput, "usage: alo auth set|status|delete openrouter [--file]")
 		return 2
+	}
+	store := credentialStore
+	backend := "OS keyring"
+	if len(args) == 3 {
+		store = fileCredentialStore
+		backend = "credential file"
 	}
 	switch args[0] {
 	case "set":
@@ -37,14 +44,14 @@ func authCommand(ctx context.Context, args []string, input io.Reader, output, er
 			fmt.Fprintln(errorOutput, "OpenRouter API key may not be empty")
 			return 2
 		}
-		if err := credentialStore.Set(args[1], secret); err != nil {
+		if err := store.Set(args[1], secret); err != nil {
 			fmt.Fprintln(errorOutput, err)
 			return 2
 		}
-		fmt.Fprintln(output, "Stored OpenRouter credential in the OS keyring.")
+		fmt.Fprintf(output, "Stored OpenRouter credential in the %s.\n", backend)
 		return 0
 	case "status":
-		_, err := credentialStore.Get(args[1])
+		_, err := store.Get(args[1])
 		if errors.Is(err, auth.ErrNotFound) {
 			fmt.Fprintln(output, "OpenRouter credential is not configured.")
 			return 1
@@ -53,10 +60,14 @@ func authCommand(ctx context.Context, args []string, input io.Reader, output, er
 			fmt.Fprintln(errorOutput, err)
 			return 2
 		}
-		fmt.Fprintln(output, "OpenRouter credential is configured.")
+		if len(args) == 3 {
+			fmt.Fprintln(output, "OpenRouter credential is configured in the credential file.")
+		} else {
+			fmt.Fprintln(output, "OpenRouter credential is configured.")
+		}
 		return 0
 	case "delete":
-		err := credentialStore.Delete(args[1])
+		err := store.Delete(args[1])
 		if errors.Is(err, auth.ErrNotFound) {
 			fmt.Fprintln(output, "OpenRouter credential is not configured.")
 			return 0
@@ -65,10 +76,10 @@ func authCommand(ctx context.Context, args []string, input io.Reader, output, er
 			fmt.Fprintln(errorOutput, err)
 			return 2
 		}
-		fmt.Fprintln(output, "Deleted OpenRouter credential from the OS keyring.")
+		fmt.Fprintf(output, "Deleted OpenRouter credential from the %s.\n", backend)
 		return 0
 	default:
-		fmt.Fprintln(errorOutput, "usage: alo auth set|status|delete openrouter")
+		fmt.Fprintln(errorOutput, "usage: alo auth set|status|delete openrouter [--file]")
 		return 2
 	}
 }

@@ -1,0 +1,43 @@
+version: 1
+name: rubikpi3-alpine-grub
+goal: >-
+  Boot an Alpine Linux user space on the connected RUBIK Pi 3 for one boot only.
+  Use the existing UFS GRUB command line and do not change its persistent boot
+  configuration. Preserve the installed system and its default kernel. Leave a
+  reproducible solution in the candidate workspace. The final environment must
+  provide an interactive root shell on the debug serial port, identify itself
+  through /etc/alpine-release, report the aarch64 architecture, and contain
+  alo_alpine=1 in the kernel command line. Use ALO_PARAMETER_ADB_SERIAL to
+  select the ADB target when that parameter is not empty.
+
+parameters:
+  serial: /dev/ttyACM0
+  baud: "115200"
+  adb_serial: ""
+
+candidate: ./automation
+
+sandbox:
+  devices:
+    - /dev/bus/usb
+    - /dev/ttyACM0
+
+agent:
+  provider: openrouter
+  model: openai/gpt-5.6-sol
+  thinking: medium
+  zdr: true
+  timeout: 30m
+
+prepare:
+  command: [./prepare]
+  timeout: 2m
+
+exercise:
+  timeout: 30m
+
+verify:
+  command: [./verify]
+  timeout: 30s
+
+attempts: 20

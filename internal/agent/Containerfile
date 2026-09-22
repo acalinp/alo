@@ -3,8 +3,10 @@ FROM docker.io/library/node:24-bookworm
 ARG PI_VERSION=0.84.4
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    adb \
     build-essential \
     ca-certificates \
+    cpio \
     curl \
     file \
     git \

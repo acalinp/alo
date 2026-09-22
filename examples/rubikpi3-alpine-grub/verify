@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+serial=${ALO_PARAMETER_SERIAL:?}
+baud=${ALO_PARAMETER_BAUD:?}
+
+for command in od stty timeout tr; do
+	command -v "$command" >/dev/null || {
+		echo "infrastructure failure: missing host command $command" >&2
+		exit 2
+	}
+done
+[[ -c "$serial" ]] || {
+	echo "infrastructure failure: serial device is unavailable: $serial" >&2
+	exit 2
+}
+
+stty -F "$serial" "$baud" raw -echo -ixon -ixoff
+exec 3<>"$serial"
+
+# Remove bytes that arrived after candidate replay released the serial port.
+timeout 1s cat <&3 >/dev/null 2>&1 || true
+
+nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+marker="ALO_VERIFY_$nonce"
+
+printf '\r\n' >&3
+sleep 0.2
+printf "printf 'ALO_'; printf 'VERIFY_%s\\n'; cat /etc/alpine-release; uname -m; cat /proc/cmdline\r\n" "$nonce" >&3
+
+transcript=$(timeout 12s cat <&3 || true)
+printf '%s\n' "$transcript"
+
+if ! grep -Fq "$marker" <<<"$transcript"; then
+	echo "candidate failure: the target did not answer the serial challenge" >&2
+	exit 1
+fi
+if ! grep -Eq '(^|[[:space:]])[0-9]+\.[0-9]+(\.[0-9]+)?([._-][[:alnum:]]+)?([[:space:]]|$)' <<<"$transcript"; then
+	echo "candidate failure: /etc/alpine-release was not returned" >&2
+	exit 1
+fi
+if ! grep -Eq '(^|[[:space:]])aarch64([[:space:]]|$)' <<<"$transcript"; then
+	echo "candidate failure: the target did not report aarch64" >&2
+	exit 1
+fi
+if ! grep -Eq '(^|[[:space:]])alo_alpine=1([[:space:]]|$)' <<<"$transcript"; then
+	echo "candidate failure: the running kernel lacks alo_alpine=1" >&2
+	exit 1
+fi

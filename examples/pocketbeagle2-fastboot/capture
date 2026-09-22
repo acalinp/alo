@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+serial=${ALO_PARAMETER_SERIAL:?}
+evidence=${ALO_EVIDENCE_DIR:?}
+ready_fd=${ALO_CAPTURE_READY_FD:?}
+
+command -v stty >/dev/null || {
+	echo "infrastructure failure: missing host command stty" >&2
+	exit 2
+}
+[[ -c "$serial" ]] || {
+	echo "infrastructure failure: serial device is unavailable: $serial" >&2
+	exit 2
+}
+stty -F "$serial" 115200 raw -echo -ixon -ixoff
+exec 4<"$serial"
+printf . >&"$ready_fd"
+exec {ready_fd}>&-
+cat <&4

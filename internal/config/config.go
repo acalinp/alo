@@ -17,7 +17,6 @@ import (
 
 const (
 	defaultAttempts        = 10
-	defaultAgentTimeout    = 15 * time.Minute
 	defaultExerciseTimeout = 30 * time.Minute
 	defaultCommandTimeout  = 30 * time.Minute
 	defaultAgentProvider   = "openrouter"
@@ -41,6 +40,7 @@ type Config struct {
 	References map[string]string `yaml:"references,omitempty"`
 	Sandbox    SandboxConfig     `yaml:"sandbox,omitempty"`
 	Agent      AgentConfig       `yaml:"agent,omitempty"`
+	Capture    *CaptureConfig    `yaml:"capture,omitempty"`
 	Prepare    *CommandConfig    `yaml:"prepare,omitempty"`
 	Exercise   ExerciseConfig    `yaml:"exercise,omitempty"`
 	Verify     CommandConfig     `yaml:"verify"`
@@ -51,12 +51,13 @@ type Config struct {
 }
 
 type AgentConfig struct {
-	Provider string   `yaml:"provider,omitempty"`
-	Model    string   `yaml:"model,omitempty"`
-	Thinking string   `yaml:"thinking,omitempty"`
-	ZDR      bool     `yaml:"zdr,omitempty"`
-	PassEnv  []string `yaml:"pass_env,omitempty"`
-	Timeout  Duration `yaml:"timeout,omitempty"`
+	Provider         string   `yaml:"provider,omitempty"`
+	Model            string   `yaml:"model,omitempty"`
+	Thinking         string   `yaml:"thinking,omitempty"`
+	ZDR              bool     `yaml:"zdr,omitempty"`
+	PassEnv          []string `yaml:"pass_env,omitempty"`
+	BootstrapTimeout Duration `yaml:"bootstrap_timeout,omitempty"`
+	Timeout          Duration `yaml:"timeout,omitempty"`
 }
 
 type SandboxConfig struct {
@@ -65,6 +66,10 @@ type SandboxConfig struct {
 
 type ExerciseConfig struct {
 	Timeout Duration `yaml:"timeout,omitempty"`
+}
+
+type CaptureConfig struct {
+	Command []string `yaml:"command"`
 }
 
 type CommandConfig struct {
@@ -138,8 +143,8 @@ func (c *Config) SetDefaults() {
 	if c.Attempts == 0 {
 		c.Attempts = defaultAttempts
 	}
-	if c.Agent.Timeout == 0 {
-		c.Agent.Timeout = Duration(defaultAgentTimeout)
+	if c.Agent.BootstrapTimeout == 0 {
+		c.Agent.BootstrapTimeout = c.Agent.Timeout
 	}
 	if c.Agent.Provider == "" && c.Agent.Model == "" {
 		c.Agent.Provider = defaultAgentProvider
@@ -200,18 +205,32 @@ func (c *Config) resolvePaths() error {
 		}
 		c.References[name] = resolved
 	}
-	for label, command := range map[string]*CommandConfig{
-		"prepare": c.Prepare,
-		"verify":  &c.Verify,
-	} {
-		if command == nil || len(command.Command) == 0 {
+	commands := map[string][]string{
+		"prepare": nil,
+		"verify":  c.Verify.Command,
+	}
+	if c.Prepare != nil {
+		commands["prepare"] = c.Prepare.Command
+	}
+	if c.Capture != nil {
+		commands["capture"] = c.Capture.Command
+	}
+	for label, command := range commands {
+		if len(command) == 0 {
 			continue
 		}
-		resolved, err := resolveExecutable(c.BaseDir, command.Command[0])
+		resolved, err := resolveExecutable(c.BaseDir, command[0])
 		if err != nil {
 			return fmt.Errorf("resolve %s executable: %w", label, err)
 		}
-		command.Command[0] = resolved
+		switch label {
+		case "prepare":
+			c.Prepare.Command[0] = resolved
+		case "capture":
+			c.Capture.Command[0] = resolved
+		case "verify":
+			c.Verify.Command[0] = resolved
+		}
 	}
 	return nil
 }
@@ -282,8 +301,11 @@ func (c *Config) Validate() error {
 	if c.Prepare != nil && (len(c.Prepare.Command) == 0 || strings.TrimSpace(c.Prepare.Command[0]) == "") {
 		return errors.New("prepare.command requires at least one argument")
 	}
-	if time.Duration(c.Agent.Timeout) <= 0 || time.Duration(c.Exercise.Timeout) <= 0 || time.Duration(c.Verify.Timeout) <= 0 {
-		return errors.New("agent, exercise, and verify timeouts must be positive")
+	if c.Capture != nil && (len(c.Capture.Command) == 0 || strings.TrimSpace(c.Capture.Command[0]) == "") {
+		return errors.New("capture.command requires at least one argument")
+	}
+	if time.Duration(c.Agent.BootstrapTimeout) < 0 || time.Duration(c.Agent.Timeout) < 0 || time.Duration(c.Exercise.Timeout) <= 0 || time.Duration(c.Verify.Timeout) <= 0 {
+		return errors.New("agent timeouts may be omitted; exercise and verify timeouts must be positive")
 	}
 	if err := validateAgentValue("agent.provider", c.Agent.Provider); err != nil {
 		return err
@@ -349,13 +371,18 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
-	for label, command := range map[string]*CommandConfig{"prepare": c.Prepare, "verify": &c.Verify} {
-		if command == nil {
-			continue
-		}
-		if err := validateTrustedExecutable(label, command.Command[0], c.Candidate); err != nil {
+	if c.Capture != nil {
+		if err := validateTrustedExecutable("capture", c.Capture.Command[0], c.Candidate); err != nil {
 			return err
 		}
+	}
+	if c.Prepare != nil {
+		if err := validateTrustedExecutable("prepare", c.Prepare.Command[0], c.Candidate); err != nil {
+			return err
+		}
+	}
+	if err := validateTrustedExecutable("verify", c.Verify.Command[0], c.Candidate); err != nil {
+		return err
 	}
 	return nil
 }

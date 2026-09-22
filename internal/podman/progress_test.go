@@ -26,7 +26,7 @@ func TestTerminalProgressKeepsAnimationOutOfAgentStream(t *testing.T) {
 	stream := io.MultiWriter(&retained, progress)
 
 	progress.render(now)
-	if !strings.Contains(console.String(), "[run] agent working") {
+	if !strings.Contains(console.String(), "[agent run] agent working") {
 		t.Fatalf("progress output = %q", console.String())
 	}
 	if !strings.Contains(console.String(), "5s elapsed · 55s remaining") {
@@ -40,7 +40,7 @@ func TestTerminalProgressKeepsAnimationOutOfAgentStream(t *testing.T) {
 	}
 	progress.lastOutput = now.Add(-2 * time.Second)
 	progress.render(now.Add(2 * time.Second))
-	if !strings.Contains(console.String(), "[run] agent running bash") {
+	if !strings.Contains(console.String(), "[agent run] agent running bash") {
 		t.Fatalf("stateful progress output = %q", console.String())
 	}
 	if _, err := io.WriteString(stream, "agent output"); err != nil {

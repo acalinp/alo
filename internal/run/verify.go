@@ -135,6 +135,17 @@ func trustedEnvironment(config *cfg.Config, passEnv []string, evidenceDir, resul
 	return environment
 }
 
+func captureEnvironment(config *cfg.Config, evidenceDir string) []string {
+	environment := selectedEnvironment([]string{"HOME", "LANG", "LC_ALL", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "USER"})
+	environment = append(environment, "ALO_EVIDENCE_DIR="+evidenceDir)
+	for _, name := range sortedKeys(config.Parameters) {
+		environment = append(environment,
+			"ALO_PARAMETER_"+cfg.EnvironmentName(name)+"="+config.Parameters[name],
+		)
+	}
+	return environment
+}
+
 func selectedEnvironment(names []string) []string {
 	seen := make(map[string]bool)
 	var result []string
